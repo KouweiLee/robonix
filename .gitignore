@@ -36,3 +36,12 @@ skill/__init__.py
 tmp/
 test_performance
 publish_camera_tf.py
+
+.env
+lib
+tailscale
+output
+build
+install
+log
+venv
