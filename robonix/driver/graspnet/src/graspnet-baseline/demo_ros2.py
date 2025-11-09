@@ -17,8 +17,9 @@ from std_msgs.msg import String, Float32, Header
 
 try:
     from graspnet_msgs.msg import GraspPose
+    from graspnet_msgs.srv import GraspRequest
 except Exception as import_err:
-    print("[!] Missing ROS2 message type 'graspnet_msgs/GraspPose'.")
+    print("[!] Missing ROS2 message types from 'graspnet_msgs'.")
     print("    Please build and source the message package before running:")
     print("    1) cd src && colcon build")
     print("    2) source src/install/setup.bash")
@@ -26,8 +27,6 @@ except Exception as import_err:
 from cv_bridge import CvBridge
 import threading
 import time
-import json
-import queue
 from scipy.spatial.transform import Rotation as R
 
 import torch
@@ -72,10 +71,7 @@ class GraspNetRos2Node(Node):
         self.depth_image = None
         self.camera_info = None
         self.data_lock = threading.Lock()
-        self.grasp_result_queue = queue.Queue(maxsize=5)
-        self.running = True
-        self.processing_thread = None
-        self.publishing_thread = None
+        
         self.sub_color = self.create_subscription(
             Image,
             cfgs.color_topic,
@@ -95,15 +91,18 @@ class GraspNetRos2Node(Node):
             10)
         
         self.grasp_pub = self.create_publisher(GraspPose, cfgs.grasp_topic, 10)
-        self.processing_thread = threading.Thread(target=self.processing_loop, daemon=True)
-        self.publishing_thread = threading.Thread(target=self.publishing_loop, daemon=True)
-        self.processing_thread.start()
-        self.publishing_thread.start()
+        
+        # Create grasp request service
+        self.grasp_service = self.create_service(
+            GraspRequest,
+            '/graspnet/grasp_request',
+            self.handle_grasp_request)
         
         self.get_logger().info('[*] GraspNet ROS2 node started')
         self.get_logger().info(f'[*] Subscribing to: {cfgs.color_topic}, {cfgs.depth_topic}, {cfgs.camera_info_topic}')
         self.get_logger().info(f'[*] Publishing grasps to: {cfgs.grasp_topic}')
-        self.get_logger().info(f'[*] Processing interval: {cfgs.processing_interval}s')
+        self.get_logger().info(f'[*] Service available at: /graspnet/grasp_request')
+        self.get_logger().info('[*] Node will process frames only when service is called')
     
     def color_callback(self, msg):
         try:
@@ -126,51 +125,63 @@ class GraspNetRos2Node(Node):
         with self.data_lock:
             self.camera_info = msg
     
-    def processing_loop(self):
-        while self.running:
-            try:
-                with self.data_lock:
-                    if self.color_image is None or self.depth_image is None or self.camera_info is None:
-                        for _ in range(10):
-                            if not self.running:
-                                break
-                            time.sleep(0.01)
-                        continue
-                    color_img = self.color_image.copy()
-                    depth_img = self.depth_image.copy()
-                    cam_info = self.camera_info
+    def handle_grasp_request(self, request, response):
+        """Handle grasp request service call."""
+        object_name = request.object_name
+        bbox_2d = list(request.bbox_2d) if len(request.bbox_2d) == 4 else None
+        
+        self.get_logger().info(f'[*] Received grasp request for object: {object_name}')
+        if bbox_2d:
+            self.get_logger().info(f'[*] 2D bbox constraint (pixels): {bbox_2d}')
+        
+        try:
+            # Get current camera data
+            with self.data_lock:
+                if self.color_image is None or self.depth_image is None or self.camera_info is None:
+                    response.success = False
+                    response.message = 'Camera data not available'
+                    self.get_logger().error(response.message)
+                    return response
                 
-                if not self.running:
-                    break
-                
-                grasp_result = self.process_frame(color_img, depth_img, cam_info)
-                
-                if grasp_result is not None:
-                    try:
-                        self.grasp_result_queue.put_nowait(grasp_result)
-                    except queue.Full:
-                        self.get_logger().warn('Grasp result queue full, dropping oldest result')
-                        try:
-                            self.grasp_result_queue.get_nowait()
-                            self.grasp_result_queue.put_nowait(grasp_result)
-                        except queue.Empty:
-                            pass
-                
-                elapsed = 0.0
-                check_interval = 0.1
-                while elapsed < cfgs.processing_interval and self.running:
-                    time.sleep(min(check_interval, cfgs.processing_interval - elapsed))
-                    elapsed += check_interval
-                
-            except Exception as e:
-                if self.running:
-                    self.get_logger().error(f'Error in processing loop: {e}')
-                    import traceback
-                    self.get_logger().error(traceback.format_exc())
-                for _ in range(10):
-                    if not self.running:
-                        break
-                    time.sleep(0.1)
+                color_img = self.color_image.copy()
+                depth_img = self.depth_image.copy()
+                cam_info = self.camera_info
+            
+            # Process frame with 2D bbox constraint
+            grasp_result = self.process_frame(color_img, depth_img, cam_info, bbox_2d=bbox_2d)
+            
+            if grasp_result is None:
+                response.success = False
+                response.message = 'Failed to generate grasp pose'
+                self.get_logger().warning(response.message)
+                return response
+            
+            best_grasp = grasp_result['grasp']
+            
+            # Populate response
+            response.grasp_pose = self.grasp_to_pose_stamped(best_grasp)
+            response.gripper_width = float(best_grasp.width)
+            response.score = float(best_grasp.score)
+            response.success = True
+            response.message = f"Grasp pose generated for '{object_name}'"
+            
+            # Also publish to topic (maintaining existing behavior)
+            grasp_pose_msg = GraspPose()
+            grasp_pose_msg.target_pose = response.grasp_pose
+            grasp_pose_msg.gripper_width = response.gripper_width
+            self.grasp_pub.publish(grasp_pose_msg)
+            
+            self.get_logger().info(f'[*] Grasp pose generated: score={response.score:.3f}, width={response.gripper_width:.3f}m')
+            
+            return response
+            
+        except Exception as e:
+            response.success = False
+            response.message = f'Error during grasp generation: {str(e)}'
+            self.get_logger().error(response.message)
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            return response
     
     def grasp_to_pose_stamped(self, grasp):
         msg = PoseStamped()
@@ -192,38 +203,15 @@ class GraspNetRos2Node(Node):
         
         return msg
     
-    def publishing_loop(self):
-        while self.running:
-            try:
-                try:
-                    grasp_data = self.grasp_result_queue.get(timeout=0.1)
-                    
-                    if not self.running:
-                        break
-                    
-                    best_grasp = grasp_data['grasp']
-                    pose_msg = self.grasp_to_pose_stamped(best_grasp)
-                    gripper_width = float(best_grasp.width)
-                    
-                    grasp_pose_msg = GraspPose()
-                    grasp_pose_msg.target_pose = pose_msg
-                    grasp_pose_msg.gripper_width = gripper_width
-                    self.grasp_pub.publish(grasp_pose_msg)
-                except queue.Empty:
-                    continue
-                    
-            except Exception as e:
-                if self.running:
-                    self.get_logger().error(f'Error in publishing loop: {e}')
-                    import traceback
-                    self.get_logger().error(traceback.format_exc())
-                for _ in range(10):
-                    if not self.running:
-                        break
-                    time.sleep(0.01)
-    
-    def process_frame(self, color_img, depth_img, cam_info):
-        """Process one frame and return grasp results."""
+    def process_frame(self, color_img, depth_img, cam_info, bbox_2d=None):
+        """Process one frame and return grasp results.
+        
+        Args:
+            color_img: RGB image
+            depth_img: Depth image
+            cam_info: Camera info
+            bbox_2d: Optional 2D bounding box [x_min, y_min, x_max, y_max] in pixels to filter grasps
+        """
         start_time = time.time()
         
         try:
@@ -253,6 +241,7 @@ class GraspNetRos2Node(Node):
                 self.get_logger().warning('No valid points in point cloud')
                 return None
             
+            # Apply table filtering to whole scene (no 3D bbox filtering)
             if len(cloud_masked) > 0:
                 z_coords = cloud_masked[:, 2]
                 z_median = np.median(z_coords)
@@ -283,7 +272,7 @@ class GraspNetRos2Node(Node):
                 color_masked = color_masked[table_mask]
             
             if len(cloud_masked) == 0:
-                self.get_logger().warning('No valid points in point cloud after table filtering')
+                self.get_logger().warning('No valid points in point cloud after filtering')
                 return None
             
             if len(cloud_masked) >= cfgs.num_point:
@@ -328,13 +317,47 @@ class GraspNetRos2Node(Node):
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
                 gg = gg[~collision_mask]
             
-            gg = gg[:1] # only keep the best grasp
-            if not cfgs.headless:
-                self.visualize_grasps(gg, vis_cloud)
+            # Filter grasps by 2D bbox if provided
+            # Project 3D grasp positions to 2D image and check if within bbox
+            if bbox_2d is not None and len(bbox_2d) == 4 and len(gg) > 0:
+                x_min_2d, y_min_2d, x_max_2d, y_max_2d = bbox_2d
+                self.get_logger().info(f'[*] Filtering grasps by 2D bbox: x=[{x_min_2d}, {x_max_2d}], y=[{y_min_2d}, {y_max_2d}]')
+                
+                # Get camera intrinsics for projection
+                K = cam_info.k
+                fx, fy = K[0], K[4]
+                cx, cy = K[2], K[5]
+                
+                # Filter grasps whose 3D position projects within 2D bbox
+                valid_grasps = []
+                for i in range(len(gg)):
+                    grasp = gg[i]
+                    trans = grasp.translation  # 3D position in camera frame
+                    
+                    # Project 3D point to 2D image plane
+                    # x_2d = fx * X/Z + cx
+                    # y_2d = fy * Y/Z + cy
+                    if trans[2] > 0:  # Check valid depth
+                        x_2d = fx * trans[0] / trans[2] + cx
+                        y_2d = fy * trans[1] / trans[2] + cy
+                        
+                        # Check if projected point is within 2D bbox
+                        if (x_min_2d <= x_2d <= x_max_2d and 
+                            y_min_2d <= y_2d <= y_max_2d):
+                            valid_grasps.append(i)
+                
+                if len(valid_grasps) > 0:
+                    gg = gg[valid_grasps]
+                    self.get_logger().info(f'[*] Grasps after 2D bbox filter: {len(gg)}')
+                else:
+                    self.get_logger().warning('[*] No grasps found within 2D bbox region')
             
             gg.nms()
             gg.sort_by_score()
-            # gg = gg[:50] 
+            
+            # Keep only the best grasp for visualization
+            if not cfgs.headless and len(gg) > 0:
+                self.visualize_grasps(gg[:1], vis_cloud)
             
             processing_time = time.time() - start_time
             
@@ -387,14 +410,10 @@ def get_net():
 
 
 _node_instance = None
-_shutdown_flag = threading.Event()
 
 def signal_handler(sig, frame):
-    global _node_instance, _shutdown_flag
+    global _node_instance
     print("\n[*] Ctrl-C detected, shutting down gracefully...", flush=True)
-    _shutdown_flag.set()
-    if _node_instance is not None:
-        _node_instance.running = False
     try:
         import rclpy
         if rclpy.ok():
@@ -404,105 +423,42 @@ def signal_handler(sig, frame):
 
 
 def main():
-    global _node_instance, _shutdown_flag
+    global _node_instance
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     rclpy.init()
     
     node = None
-    ros2_thread = None
-    executor = None
     try:
         print("[*] Loading GraspNet model...")
         net = get_net()
         node = GraspNetRos2Node(net)
         _node_instance = node
         
-        print("[*] Starting continuous processing (press Ctrl+C to stop)...")
-        print(f"[*] Processing frame every {cfgs.processing_interval} seconds")
-        print("[*] Grasp results will be published to:", cfgs.grasp_topic)
+        print("[*] GraspNet node ready, waiting for service calls...")
+        print("[*] Service available at: /graspnet/grasp_request")
+        print("[*] Press Ctrl+C to stop")
         
-        executor = rclpy.executors.SingleThreadedExecutor()
-        executor.add_node(node)
-        
-        def ros2_spin_thread():
-            try:
-                while rclpy.ok() and node.running and not _shutdown_flag.is_set():
-                    executor.spin_once(timeout_sec=0.1)
-            except Exception:
-                pass
-        
-        ros2_thread = threading.Thread(target=ros2_spin_thread, daemon=True)
-        ros2_thread.start()
-        
-        try:
-            import select
-            use_select = hasattr(select, 'select')
-            
-            while rclpy.ok() and node.running and not _shutdown_flag.is_set():
-                if use_select:
-                    try:
-                        select.select([], [], [], 0.01)
-                    except (KeyboardInterrupt, SystemExit):
-                        print("\n[*] Interrupt detected...", flush=True)
-                        _shutdown_flag.set()
-                        node.running = False
-                        break
-                else:
-                    try:
-                        time.sleep(0.01)
-                    except KeyboardInterrupt:
-                        print("\n[*] KeyboardInterrupt...", flush=True)
-                        _shutdown_flag.set()
-                        node.running = False
-                        break
-        except (KeyboardInterrupt, SystemExit):
-            print("\n[*] Interrupt caught...", flush=True)
-            _shutdown_flag.set()
-            node.running = False
+        # Spin and wait for service calls
+        rclpy.spin(node)
     
     except KeyboardInterrupt:
         print("\n[*] Shutting down...")
-        if node is not None:
-            node.running = False
     except rclpy.executors.ExternalShutdownException:
         print("\n[*] ROS2 shutdown requested externally...")
-        if node is not None:
-            node.running = False
     except Exception as e:
         print(f"\n[*] Error: {e}")
         import traceback
         traceback.print_exc()
-        if node is not None:
-            node.running = False
     finally:
-        _shutdown_flag.set()
         _node_instance = None
         
         if node is not None:
-            print("[*] Stopping threads...", flush=True)
-            node.running = False
-            
-            if ros2_thread is not None and ros2_thread.is_alive():
-                ros2_thread.join(timeout=0.5)
-            
-            if node.processing_thread is not None and node.processing_thread.is_alive():
-                node.processing_thread.join(timeout=0.5)
-            
-            if node.publishing_thread is not None and node.publishing_thread.is_alive():
-                node.publishing_thread.join(timeout=0.5)
-            
             try:
                 node.destroy_node()
             except Exception as e:
                 print(f"[*] Error destroying node: {e}")
-        
-        if executor is not None:
-            try:
-                executor.shutdown()
-            except:
-                pass
         
         try:
             if rclpy.ok():

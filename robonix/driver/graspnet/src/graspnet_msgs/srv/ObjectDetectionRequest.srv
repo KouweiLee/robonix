@@ -1,0 +1,20 @@
+# Request: object name to detect
+string object_name
+
+---
+# Response: 2D bounding box in image coordinates
+# If detection fails, success will be false
+
+# 2D bounding box in pixel coordinates [x_min, y_min, x_max, y_max]
+float64[] bbox_2d
+
+# Detection confidence score
+float32 confidence
+
+# Success flag
+bool success
+
+# Status message
+string message
+
+

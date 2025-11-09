@@ -11,14 +11,16 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# Generate messages
+# Generate messages and services
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GraspPose.msg"
+  "srv/ObjectDetectionRequest.srv"
+  "srv/GraspRequest.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-# Install message files
-install(DIRECTORY msg
+# Install message and service files
+install(DIRECTORY msg srv
   DESTINATION share/${PROJECT_NAME}/
 )
 

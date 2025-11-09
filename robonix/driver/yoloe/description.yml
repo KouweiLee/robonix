@@ -1,0 +1,8 @@
+name: "yoloe_detection"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: false
+startup_command: "bash run.sh"
+description: "YOLO-based object detection node for robotic grasping"
+
+
