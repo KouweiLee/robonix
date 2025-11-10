@@ -5,6 +5,10 @@ string object_name
 # Used to filter grasp poses by projecting 3D pose back to 2D image
 float64[] bbox_2d
 
+# 3D center position of the object in camera frame [x, y, z]
+# Used to filter grasp poses by 3D distance
+float64[] object_center_3d
+
 ---
 # Response: best grasp pose for the object within the 2D ROI
 

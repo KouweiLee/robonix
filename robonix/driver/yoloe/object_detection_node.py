@@ -159,9 +159,18 @@ class YOLODetectionNode(Node):
             self.get_logger().info(f'[*] Object detected: {object_name}, confidence: {response.confidence:.3f}')
             self.get_logger().info(f'[*] 2D bbox: {response.bbox_2d}')
             
-            # Now call GraspNet service with 2D bbox
+            # Calculate 3D center of the object
+            object_center_3d = self.calculate_object_center_3d(
+                response.bbox_2d, depth_img, cam_info)
+            
+            if object_center_3d is not None:
+                self.get_logger().info(f'[*] Object 3D center: [{object_center_3d[0]:.3f}, {object_center_3d[1]:.3f}, {object_center_3d[2]:.3f}]m')
+            else:
+                self.get_logger().warning('[*] Failed to calculate object 3D center')
+            
+            # Now call GraspNet service with 2D bbox and 3D center
             self.get_logger().info('[*] Requesting grasp pose from GraspNet...')
-            grasp_response = self.request_grasp(object_name, response.bbox_2d)
+            grasp_response = self.request_grasp(object_name, response.bbox_2d, object_center_3d)
             
             if grasp_response is not None and grasp_response.success:
                 self.get_logger().info(f'[*] Grasp pose received: score={grasp_response.score:.3f}, width={grasp_response.gripper_width:.3f}m')
@@ -264,7 +273,48 @@ class YOLODetectionNode(Node):
             result['message'] = f'Detection error: {str(e)}'
             return result
     
-    def request_grasp(self, object_name, bbox_2d):
+    def calculate_object_center_3d(self, bbox_2d, depth_img, cam_info):
+        """Calculate 3D center position of object from 2D bbox and depth image."""
+        try:
+            x_min, y_min, x_max, y_max = [int(v) for v in bbox_2d]
+            
+            # Extract depth values in the bounding box region
+            depth_roi = depth_img[y_min:y_max, x_min:x_max]
+            
+            # Filter out invalid depth values (0 or too far)
+            valid_depths = depth_roi[(depth_roi > 0) & (depth_roi < 3000)]  # depth in mm, max 3m
+            
+            if len(valid_depths) == 0:
+                self.get_logger().warning('No valid depth values in object bounding box')
+                return None
+            
+            # Calculate median depth (more robust than mean)
+            depth_median = np.median(valid_depths) / 1000.0  # Convert mm to meters
+            
+            # Calculate center pixel coordinates
+            center_x = (x_min + x_max) / 2.0
+            center_y = (y_min + y_max) / 2.0
+            
+            # Get camera intrinsics
+            K = cam_info.k
+            fx, fy = K[0], K[4]
+            cx, cy = K[2], K[5]
+            
+            # Back-project 2D center to 3D using median depth
+            # X = (u - cx) * Z / fx
+            # Y = (v - cy) * Z / fy
+            # Z = depth
+            x_3d = (center_x - cx) * depth_median / fx
+            y_3d = (center_y - cy) * depth_median / fy
+            z_3d = depth_median
+            
+            return [x_3d, y_3d, z_3d]
+            
+        except Exception as e:
+            self.get_logger().error(f'Error calculating 3D center: {e}')
+            return None
+    
+    def request_grasp(self, object_name, bbox_2d, object_center_3d=None):
         """Request grasp pose from GraspNet service."""
         try:
             # Wait for service to be available
@@ -272,10 +322,11 @@ class YOLODetectionNode(Node):
                 self.get_logger().warning('GraspNet service not available')
                 return None
             
-            # Create request with 2D bounding box
+            # Create request with 2D bounding box and 3D center
             request = GraspRequest.Request()
             request.object_name = object_name
             request.bbox_2d = bbox_2d
+            request.object_center_3d = object_center_3d if object_center_3d is not None else []
             
             # Call service synchronously
             future = self.grasp_client.call_async(request)

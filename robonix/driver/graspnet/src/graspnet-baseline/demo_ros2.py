@@ -129,10 +129,13 @@ class GraspNetRos2Node(Node):
         """Handle grasp request service call."""
         object_name = request.object_name
         bbox_2d = list(request.bbox_2d) if len(request.bbox_2d) == 4 else None
+        object_center_3d = list(request.object_center_3d) if len(request.object_center_3d) == 3 else None
         
         self.get_logger().info(f'[*] Received grasp request for object: {object_name}')
         if bbox_2d:
             self.get_logger().info(f'[*] 2D bbox constraint (pixels): {bbox_2d}')
+        if object_center_3d:
+            self.get_logger().info(f'[*] 3D center constraint (meters): [{object_center_3d[0]:.3f}, {object_center_3d[1]:.3f}, {object_center_3d[2]:.3f}]')
         
         try:
             # Get current camera data
@@ -147,8 +150,8 @@ class GraspNetRos2Node(Node):
                 depth_img = self.depth_image.copy()
                 cam_info = self.camera_info
             
-            # Process frame with 2D bbox constraint
-            grasp_result = self.process_frame(color_img, depth_img, cam_info, bbox_2d=bbox_2d)
+            # Process frame with 2D bbox and 3D center constraints
+            grasp_result = self.process_frame(color_img, depth_img, cam_info, bbox_2d=bbox_2d, object_center_3d=object_center_3d)
             
             if grasp_result is None:
                 response.success = False
@@ -203,7 +206,7 @@ class GraspNetRos2Node(Node):
         
         return msg
     
-    def process_frame(self, color_img, depth_img, cam_info, bbox_2d=None):
+    def process_frame(self, color_img, depth_img, cam_info, bbox_2d=None, object_center_3d=None):
         """Process one frame and return grasp results.
         
         Args:
@@ -211,6 +214,7 @@ class GraspNetRos2Node(Node):
             depth_img: Depth image
             cam_info: Camera info
             bbox_2d: Optional 2D bounding box [x_min, y_min, x_max, y_max] in pixels to filter grasps
+            object_center_3d: Optional 3D center position [x, y, z] in meters to filter grasps by distance
         """
         start_time = time.time()
         
@@ -317,40 +321,48 @@ class GraspNetRos2Node(Node):
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
                 gg = gg[~collision_mask]
             
-            # # Filter grasps by 2D bbox if provided
-            # # Project 3D grasp positions to 2D image and check if within bbox
-            # if bbox_2d is not None and len(bbox_2d) == 4 and len(gg) > 0:
-            #     x_min_2d, y_min_2d, x_max_2d, y_max_2d = bbox_2d
-            #     self.get_logger().info(f'[*] Filtering grasps by 2D bbox: x=[{x_min_2d}, {x_max_2d}], y=[{y_min_2d}, {y_max_2d}]')
+            # Filter grasps by 3D distance to object center
+            # This is more robust and lenient than 2D projection filtering
+            if object_center_3d is not None and len(object_center_3d) == 3 and len(gg) > 0:
+                obj_center = np.array(object_center_3d)
+                self.get_logger().info(f'[*] Filtering grasps by 3D distance to object center: [{obj_center[0]:.3f}, {obj_center[1]:.3f}, {obj_center[2]:.3f}]m')
                 
-            #     # Get camera intrinsics for projection
-            #     K = cam_info.k
-            #     fx, fy = K[0], K[4]
-            #     cx, cy = K[2], K[5]
+                # Distance threshold: 0.2 meters (lenient)
+                distance_threshold = 0.2
                 
-            #     # Filter grasps whose 3D position projects within 2D bbox
-            #     valid_grasps = []
-            #     for i in range(len(gg)):
-            #         grasp = gg[i]
-            #         trans = grasp.translation  # 3D position in camera frame
+                # Filter grasps whose 3D position is close to object center
+                valid_grasps = []
+                for i in range(len(gg)):
+                    grasp = gg[i]
+                    trans = grasp.translation  # 3D position in camera frame
                     
-            #         # Project 3D point to 2D image plane
-            #         # x_2d = fx * X/Z + cx
-            #         # y_2d = fy * Y/Z + cy
-            #         if trans[2] > 0:  # Check valid depth
-            #             x_2d = fx * trans[0] / trans[2] + cx
-            #             y_2d = fy * trans[1] / trans[2] + cy
-                        
-            #             # Check if projected point is within 2D bbox
-            #             if (x_min_2d <= x_2d <= x_max_2d and 
-            #                 y_min_2d <= y_2d <= y_max_2d):
-            #                 valid_grasps.append(i)
+                    # Calculate Euclidean distance between grasp center and object center
+                    distance = np.linalg.norm(trans - obj_center)
+                    
+                    if distance <= distance_threshold:
+                        valid_grasps.append(i)
+                        self.get_logger().debug(f'[*] Grasp {i}: distance={distance:.3f}m (valid)')
                 
-            #     if len(valid_grasps) > 0:
-            #         gg = gg[valid_grasps]
-            #         self.get_logger().info(f'[*] Grasps after 2D bbox filter: {len(gg)}')
-            #     else:
-            #         self.get_logger().warning('[*] No grasps found within 2D bbox region')
+                if len(valid_grasps) > 0:
+                    gg = gg[valid_grasps]
+                    self.get_logger().info(f'[*] Grasps after 3D distance filter: {len(gg)} (threshold: {distance_threshold}m)')
+                else:
+                    self.get_logger().warning(f'[*] No grasps found within {distance_threshold}m of object center, trying lenient threshold...')
+                    # Try a more lenient threshold if no grasps found
+                    distance_threshold = 0.3
+                    valid_grasps = []
+                    for i in range(len(gg)):
+                        grasp = gg[i]
+                        trans = grasp.translation
+                        distance = np.linalg.norm(trans - obj_center)
+                        if distance <= distance_threshold:
+                            valid_grasps.append(i)
+                    
+                    if len(valid_grasps) > 0:
+                        gg = gg[valid_grasps]
+                        self.get_logger().info(f'[*] Grasps after lenient 3D filter: {len(gg)} (threshold: {distance_threshold}m)')
+                    else:
+                        self.get_logger().warning(f'[*] Still no grasps found within {distance_threshold}m of object center')
             
             gg.nms()
             gg.sort_by_score()
