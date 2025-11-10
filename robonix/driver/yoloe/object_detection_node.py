@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
-from ultralytics import YOLOWorld
+from ultralytics import YOLOE
 import threading
 import time
 import message_filters
@@ -43,28 +43,28 @@ class YOLODetectionNode(Node):
         self.latest_camera_info = None
         self.data_lock = threading.Lock()
         
-        # Load YOLO-World model
+        # Load YOLOE model
         if model_path is None:
-            # Try to find custom model in vision skill directory
+            # Try to find custom model in current directory or vision skill directory
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            custom_model_path = os.path.join(script_dir, "..", "..", "skill", "vision", "models", "yolov8s-world.pt")
+            # Try current directory first
+            custom_model_path = os.path.join(script_dir, "yoloe-11l-seg-pf.pt")
             
-            # Use default YOLO-World model if custom model not found
             if os.path.exists(custom_model_path):
                 model_path = custom_model_path
-                self.get_logger().info(f'Using custom YOLO-World model: {model_path}')
+                self.get_logger().info(f'Using custom YOLOE model: {model_path}')
             else:
                 # Will download automatically if not present
-                model_path = 'yolov8s-world.pt'
-                self.get_logger().info('Using default YOLO-World model (will download if needed)')
+                model_path = 'yoloe-11l-seg-pf.pt'
+                self.get_logger().info('Using default YOLOE model (will download if needed)')
         
-        self.get_logger().info(f'Loading YOLO-World model from: {model_path}')
+        self.get_logger().info(f'Loading YOLOE model from: {model_path}')
         try:
-            self.yolo_model = YOLOWorld(model_path)
-            self.get_logger().info('YOLO-World model loaded successfully')
-            self.get_logger().info('Model supports open-vocabulary detection')
+            self.yolo_model = YOLOE(model_path)
+            self.get_logger().info('YOLOE model loaded successfully')
+            self.get_logger().info('Model supports prompt-free detection with 4585 predefined classes')
         except Exception as e:
-            self.get_logger().error(f'Failed to load YOLO-World model: {e}')
+            self.get_logger().error(f'Failed to load YOLOE model: {e}')
             self.get_logger().error('Please ensure ultralytics is installed: pip install ultralytics')
             raise e
         
@@ -190,34 +190,60 @@ class YOLODetectionNode(Node):
         }
         
         try:
-            # Set detection classes dynamically for YOLO-World (open-vocabulary)
-            # This allows detecting any object by name, not limited to pre-trained classes
-            self.get_logger().info(f'[*] Setting YOLO-World to detect: {object_name}')
-            self.yolo_model.set_classes([object_name])
-            
-            # Run YOLO-World inference (only detects the specified object)
-            self.get_logger().info('[*] Running YOLO-World inference...')
-            results = self.yolo_model(source=color_img, device="cuda:0", verbose=False)
+            # Run YOLOE inference (detects all predefined classes)
+            self.get_logger().info('[*] Running YOLOE inference...')
+            results = self.yolo_model.predict(source=color_img, device="cuda:0", verbose=False)
             detection = results[0]
             
             if detection is None or len(detection.boxes) == 0:
-                result['message'] = f"Object '{object_name}' not detected in image"
+                result['message'] = f"No objects detected in image"
                 return result
             
             # Extract detection results
-            # Note: YOLO-World only returns detections for the specified class
             boxes = detection.boxes.xyxy.cpu().numpy()
             confidences = detection.boxes.conf.cpu().numpy()
+            classes = detection.boxes.cls.cpu().numpy()
             
-            # Get the detection with highest confidence
-            # (YOLO-World already filtered to only the requested object)
-            best_idx = confidences.argmax()
-            best_conf = float(confidences[best_idx])
+            # Normalize object name for matching (lowercase, strip whitespace)
+            object_name_lower = object_name.lower().strip()
             
-            self.get_logger().info(f'[*] Found {len(boxes)} instance(s) of "{object_name}", best confidence: {best_conf:.3f}')
+            # Find matching objects from detection results
+            matching_indices = []
+            matching_confidences = []
+            
+            for i in range(len(boxes)):
+                detected_name = detection.names[int(classes[i])]
+                detected_name_lower = detected_name.lower()
+                conf = float(confidences[i])
+                
+                # Check if detected name matches requested object name
+                # Support exact match, substring match, or partial word match
+                if (object_name_lower == detected_name_lower or
+                    object_name_lower in detected_name_lower or
+                    detected_name_lower in object_name_lower):
+                    matching_indices.append(i)
+                    matching_confidences.append(conf)
+                    self.get_logger().info(f'[*] Found match: "{detected_name}" (confidence: {conf:.3f}) for requested "{object_name}"')
+            
+            if len(matching_indices) == 0:
+                # Log all detected objects for debugging
+                detected_names = [detection.names[int(classes[i])] for i in range(len(boxes))]
+                unique_names = list(set(detected_names))
+                self.get_logger().info(f'[*] Detected {len(boxes)} objects, but none match "{object_name}"')
+                self.get_logger().info(f'[*] Detected object types: {unique_names[:10]}...')  # Show first 10
+                result['message'] = f"Object '{object_name}' not found in detected objects"
+                return result
+            
+            # Get the detection with highest confidence among matches
+            best_match_idx = matching_confidences.index(max(matching_confidences))
+            best_idx = matching_indices[best_match_idx]
+            best_conf = matching_confidences[best_match_idx]
+            matched_name = detection.names[int(classes[best_idx])]
+            
+            self.get_logger().info(f'[*] Found {len(matching_indices)} matching instance(s) for "{object_name}", best: "{matched_name}" (confidence: {best_conf:.3f})')
             
             # Check confidence threshold
-            if best_conf < 0.3:  # Lower threshold for YOLO-World as it's open-vocabulary
+            if best_conf < 0.3:
                 result['message'] = f"Object '{object_name}' detected with low confidence: {best_conf:.3f} (threshold: 0.3)"
                 return result
             
@@ -226,7 +252,7 @@ class YOLODetectionNode(Node):
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             
             result['success'] = True
-            result['message'] = f"Object '{object_name}' detected successfully"
+            result['message'] = f"Object '{object_name}' detected successfully (matched as '{matched_name}')"
             result['bbox_2d'] = [float(x1), float(y1), float(x2), float(y2)]
             result['confidence'] = float(best_conf)
             

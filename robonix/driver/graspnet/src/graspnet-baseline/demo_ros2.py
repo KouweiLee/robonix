@@ -317,40 +317,40 @@ class GraspNetRos2Node(Node):
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
                 gg = gg[~collision_mask]
             
-            # Filter grasps by 2D bbox if provided
-            # Project 3D grasp positions to 2D image and check if within bbox
-            if bbox_2d is not None and len(bbox_2d) == 4 and len(gg) > 0:
-                x_min_2d, y_min_2d, x_max_2d, y_max_2d = bbox_2d
-                self.get_logger().info(f'[*] Filtering grasps by 2D bbox: x=[{x_min_2d}, {x_max_2d}], y=[{y_min_2d}, {y_max_2d}]')
+            # # Filter grasps by 2D bbox if provided
+            # # Project 3D grasp positions to 2D image and check if within bbox
+            # if bbox_2d is not None and len(bbox_2d) == 4 and len(gg) > 0:
+            #     x_min_2d, y_min_2d, x_max_2d, y_max_2d = bbox_2d
+            #     self.get_logger().info(f'[*] Filtering grasps by 2D bbox: x=[{x_min_2d}, {x_max_2d}], y=[{y_min_2d}, {y_max_2d}]')
                 
-                # Get camera intrinsics for projection
-                K = cam_info.k
-                fx, fy = K[0], K[4]
-                cx, cy = K[2], K[5]
+            #     # Get camera intrinsics for projection
+            #     K = cam_info.k
+            #     fx, fy = K[0], K[4]
+            #     cx, cy = K[2], K[5]
                 
-                # Filter grasps whose 3D position projects within 2D bbox
-                valid_grasps = []
-                for i in range(len(gg)):
-                    grasp = gg[i]
-                    trans = grasp.translation  # 3D position in camera frame
+            #     # Filter grasps whose 3D position projects within 2D bbox
+            #     valid_grasps = []
+            #     for i in range(len(gg)):
+            #         grasp = gg[i]
+            #         trans = grasp.translation  # 3D position in camera frame
                     
-                    # Project 3D point to 2D image plane
-                    # x_2d = fx * X/Z + cx
-                    # y_2d = fy * Y/Z + cy
-                    if trans[2] > 0:  # Check valid depth
-                        x_2d = fx * trans[0] / trans[2] + cx
-                        y_2d = fy * trans[1] / trans[2] + cy
+            #         # Project 3D point to 2D image plane
+            #         # x_2d = fx * X/Z + cx
+            #         # y_2d = fy * Y/Z + cy
+            #         if trans[2] > 0:  # Check valid depth
+            #             x_2d = fx * trans[0] / trans[2] + cx
+            #             y_2d = fy * trans[1] / trans[2] + cy
                         
-                        # Check if projected point is within 2D bbox
-                        if (x_min_2d <= x_2d <= x_max_2d and 
-                            y_min_2d <= y_2d <= y_max_2d):
-                            valid_grasps.append(i)
+            #             # Check if projected point is within 2D bbox
+            #             if (x_min_2d <= x_2d <= x_max_2d and 
+            #                 y_min_2d <= y_2d <= y_max_2d):
+            #                 valid_grasps.append(i)
                 
-                if len(valid_grasps) > 0:
-                    gg = gg[valid_grasps]
-                    self.get_logger().info(f'[*] Grasps after 2D bbox filter: {len(gg)}')
-                else:
-                    self.get_logger().warning('[*] No grasps found within 2D bbox region')
+            #     if len(valid_grasps) > 0:
+            #         gg = gg[valid_grasps]
+            #         self.get_logger().info(f'[*] Grasps after 2D bbox filter: {len(gg)}')
+            #     else:
+            #         self.get_logger().warning('[*] No grasps found within 2D bbox region')
             
             gg.nms()
             gg.sort_by_score()
