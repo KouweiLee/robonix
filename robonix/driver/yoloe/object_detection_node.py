@@ -100,8 +100,15 @@ class YOLODetectionNode(Node):
         # Create client for GraspNet service
         self.grasp_client = self.create_client(GraspRequest, '/graspnet/grasp_request')
         
+        # Create publisher for annotated detection image
+        self.detection_image_pub = self.create_publisher(
+            Image,
+            '/yolo/detection_image',
+            10)
+        
         self.get_logger().info('[*] YOLO Detection Node started')
         self.get_logger().info('[*] Service available at: /yolo/detect_object')
+        self.get_logger().info('[*] Detection image topic: /yolo/detection_image')
         self.get_logger().info('[*] Waiting for GraspNet service at: /graspnet/grasp_request')
     
     def camera_callback(self, color_msg, depth_msg, camera_info_msg):
@@ -143,6 +150,18 @@ class YOLODetectionNode(Node):
             
             # Detect object using YOLO
             detection_result = self.detect_object(object_name, color_img, depth_img, cam_info)
+            
+            # Publish annotated image if available (always publish, even if object_name filtering fails)
+            if detection_result['annotated_image'] is not None:
+                try:
+                    # YOLO's plot() returns BGR image, directly convert to ROS message
+                    annotated_msg = self.bridge.cv2_to_imgmsg(detection_result['annotated_image'], encoding='bgr8')
+                    annotated_msg.header.stamp = self.get_clock().now().to_msg()
+                    annotated_msg.header.frame_id = 'camera_color_optical_frame'
+                    self.detection_image_pub.publish(annotated_msg)
+                    self.get_logger().info('[*] Published annotated detection image to /yolo/detection_image')
+                except Exception as e:
+                    self.get_logger().warning(f'Failed to publish annotated image: {e}')
             
             if not detection_result['success']:
                 response.success = False
@@ -195,7 +214,8 @@ class YOLODetectionNode(Node):
             'success': False,
             'message': '',
             'bbox_2d': [],
-            'confidence': 0.0
+            'confidence': 0.0,
+            'annotated_image': None
         }
         
         try:
@@ -203,6 +223,11 @@ class YOLODetectionNode(Node):
             self.get_logger().info('[*] Running YOLOE inference...')
             results = self.yolo_model.predict(source=color_img, device="cuda:0", verbose=False)
             detection = results[0]
+            
+            # Get annotated image from YOLO (with all detections drawn)
+            # The plot() method returns the image with bounding boxes and labels
+            annotated_img = detection.plot()  # Returns BGR image with annotations
+            result['annotated_image'] = annotated_img
             
             if detection is None or len(detection.boxes) == 0:
                 result['message'] = f"No objects detected in image"
@@ -213,14 +238,37 @@ class YOLODetectionNode(Node):
             confidences = detection.boxes.conf.cpu().numpy()
             classes = detection.boxes.cls.cpu().numpy()
             
-            # Normalize object name for matching (lowercase, strip whitespace)
-            object_name_lower = object_name.lower().strip()
+            # First filter: confidence >= 0.3
+            self.get_logger().info(f'[*] Total detections: {len(boxes)}')
+            high_conf_indices = []
+            high_conf_objects = []
             
-            # Find matching objects from detection results
+            for i in range(len(boxes)):
+                conf = float(confidences[i])
+                if conf >= 0.3:
+                    detected_name = detection.names[int(classes[i])]
+                    high_conf_indices.append(i)
+                    high_conf_objects.append({
+                        'name': detected_name,
+                        'confidence': conf,
+                        'bbox': boxes[i]
+                    })
+            
+            # Print all high-confidence objects
+            self.get_logger().info(f'[*] Objects with confidence >= 0.3: {len(high_conf_objects)}')
+            for idx, obj in enumerate(high_conf_objects):
+                self.get_logger().info(f'    [{idx+1}] {obj["name"]} (conf: {obj["confidence"]:.3f})')
+            
+            if len(high_conf_indices) == 0:
+                result['message'] = 'No objects detected with confidence >= 0.3'
+                return result
+            
+            # Second filter: match object_name from high-confidence detections
+            object_name_lower = object_name.lower().strip()
             matching_indices = []
             matching_confidences = []
             
-            for i in range(len(boxes)):
+            for i in high_conf_indices:
                 detected_name = detection.names[int(classes[i])]
                 detected_name_lower = detected_name.lower()
                 conf = float(confidences[i])
@@ -235,12 +283,7 @@ class YOLODetectionNode(Node):
                     self.get_logger().info(f'[*] Found match: "{detected_name}" (confidence: {conf:.3f}) for requested "{object_name}"')
             
             if len(matching_indices) == 0:
-                # Log all detected objects for debugging
-                detected_names = [detection.names[int(classes[i])] for i in range(len(boxes))]
-                unique_names = list(set(detected_names))
-                self.get_logger().info(f'[*] Detected {len(boxes)} objects, but none match "{object_name}"')
-                self.get_logger().info(f'[*] Detected object types: {unique_names[:10]}...')  # Show first 10
-                result['message'] = f"Object '{object_name}' not found in detected objects"
+                result['message'] = f"Object '{object_name}' not found in high-confidence detections"
                 return result
             
             # Get the detection with highest confidence among matches
@@ -250,11 +293,6 @@ class YOLODetectionNode(Node):
             matched_name = detection.names[int(classes[best_idx])]
             
             self.get_logger().info(f'[*] Found {len(matching_indices)} matching instance(s) for "{object_name}", best: "{matched_name}" (confidence: {best_conf:.3f})')
-            
-            # Check confidence threshold
-            if best_conf < 0.3:
-                result['message'] = f"Object '{object_name}' detected with low confidence: {best_conf:.3f} (threshold: 0.3)"
-                return result
             
             # Get 2D bounding box in pixel coordinates
             x1, y1, x2, y2 = boxes[best_idx]

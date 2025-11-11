@@ -5,4 +5,4 @@
 source /opt/ros/humble/setup.bash
 source /home/syswonder/lgw/robonix/robonix/driver/graspnet/install/setup.bash
 
-python3 pick.py 'spray can'
+python3 pick.py 'box'
