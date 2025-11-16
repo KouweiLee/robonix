@@ -7,7 +7,6 @@ import rclpy
 from rclpy.node import Node
 from graspnet_msgs.srv import ObjectDetectionRequest, GraspRequest
 from geometry_msgs.msg import PoseStamped
-import time
 
 
 class PickClient:
@@ -32,6 +31,20 @@ class PickClient:
         
         self.node.get_logger().info('[*] Pick client initialized')
     
+    def _call_service(self, client, request, service_name, timeout):
+        """Helper method to call a service and wait for response."""
+        future = client.call_async(request)
+        try:
+            rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+            if future.done():
+                return future.result()
+            else:
+                self.node.get_logger().error(f'{service_name} service call timed out')
+                return None
+        except Exception as e:
+            self.node.get_logger().error(f'{service_name} service call failed: {e}')
+            return None
+    
     def pick_object(self, object_name, timeout=30.0):
         """Request to pick a specific object.
         
@@ -53,25 +66,7 @@ class PickClient:
         detection_request.object_name = object_name
         
         self.node.get_logger().info('[*] Calling YOLO detection service...')
-        detection_future = self.detection_client.call_async(detection_request)
-        
-        # Wait for detection response
-        start_time = time.time()
-        detection_response = None
-        while rclpy.ok():
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            
-            if detection_future.done():
-                try:
-                    detection_response = detection_future.result()
-                    break
-                except Exception as e:
-                    self.node.get_logger().error(f'YOLO detection service call failed: {e}')
-                    return None
-            
-            if time.time() - start_time > timeout:
-                self.node.get_logger().error('YOLO detection service call timed out')
-                return None
+        detection_response = self._call_service(            self.detection_client, detection_request, 'YOLO detection', timeout)
         
         if detection_response is None or not detection_response.success:
             self.node.get_logger().error(f'Detection failed: {detection_response.message if detection_response is not None else "No response received"}')
@@ -93,25 +88,8 @@ class PickClient:
         grasp_request.object_center_3d = detection_response.object_center_3d if detection_response.object_center_3d else []
         
         self.node.get_logger().info('[*] Calling GraspNet service...')
-        grasp_future = self.grasp_client.call_async(grasp_request)
-        
-        # Wait for grasp response
-        start_time = time.time()
-        grasp_response = None
-        while rclpy.ok():
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            
-            if grasp_future.done():
-                try:
-                    grasp_response = grasp_future.result()
-                    break
-                except Exception as e:
-                    self.node.get_logger().error(f'GraspNet service call failed: {e}')
-                    return None
-            
-            if time.time() - start_time > timeout:
-                self.node.get_logger().error('GraspNet service call timed out')
-                return None
+        grasp_response = self._call_service(
+            self.grasp_client, grasp_request, 'GraspNet', timeout)
         
         if grasp_response is None or not grasp_response.success:
             self.node.get_logger().error(f'Grasp generation failed: {grasp_response.message if grasp_response is not None else "No response received"}')

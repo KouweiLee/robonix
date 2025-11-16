@@ -6,5 +6,5 @@ source /opt/ros/humble/setup.bash
 source /home/syswonder/lgw/robonix/robonix/driver/graspnet/install/setup.bash
 
 # python3 pick.py 'illuminate'
-python3 pick.py 'locker'
+python3 pick.py 'studio shot'
 
