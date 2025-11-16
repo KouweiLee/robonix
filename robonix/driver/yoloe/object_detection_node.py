@@ -19,9 +19,9 @@ import message_filters
 
 # Import custom service messages
 try:
-    from graspnet_msgs.srv import ObjectDetectionRequest, GraspRequest
+    from graspnet_msgs.srv import ObjectDetectionRequest
 except Exception as e:
-    print("[!] Missing ROS2 service types 'graspnet_msgs/ObjectDetectionRequest' or 'graspnet_msgs/GraspRequest'.")
+    print("[!] Missing ROS2 service types 'graspnet_msgs/ObjectDetectionRequest'.")
     print("    Please build the graspnet_msgs package before running:")
     print("    1) cd robonix/driver/graspnet && bash build.sh")
     print("    2) source install/setup.bash")
@@ -97,9 +97,6 @@ class YOLODetectionNode(Node):
             '/yolo/detect_object',
             self.handle_detection_request)
         
-        # Create client for GraspNet service
-        self.grasp_client = self.create_client(GraspRequest, '/graspnet/grasp_request')
-        
         # Create publisher for annotated detection image
         self.detection_image_pub = self.create_publisher(
             Image,
@@ -109,7 +106,6 @@ class YOLODetectionNode(Node):
         self.get_logger().info('[*] YOLO Detection Node started')
         self.get_logger().info('[*] Service available at: /yolo/detect_object')
         self.get_logger().info('[*] Detection image topic: /yolo/detection_image')
-        self.get_logger().info('[*] Waiting for GraspNet service at: /graspnet/grasp_request')
     
     def camera_callback(self, color_msg, depth_msg, camera_info_msg):
         """Synchronized callback for camera data."""
@@ -172,31 +168,23 @@ class YOLODetectionNode(Node):
             # Populate detection response
             response.bbox_2d = detection_result['bbox_2d']
             response.confidence = detection_result['confidence']
-            response.success = True
-            response.message = f"Object '{object_name}' detected successfully"
-            
-            self.get_logger().info(f'[*] Object detected: {object_name}, confidence: {response.confidence:.3f}')
-            self.get_logger().info(f'[*] 2D bbox: {response.bbox_2d}')
             
             # Calculate 3D center of the object
             object_center_3d = self.calculate_object_center_3d(
                 response.bbox_2d, depth_img, cam_info)
             
             if object_center_3d is not None:
+                response.object_center_3d = list(object_center_3d)
                 self.get_logger().info(f'[*] Object 3D center: [{object_center_3d[0]:.3f}, {object_center_3d[1]:.3f}, {object_center_3d[2]:.3f}]m')
             else:
+                response.object_center_3d = []
                 self.get_logger().warning('[*] Failed to calculate object 3D center')
             
-            # Now call GraspNet service with 2D bbox and 3D center
-            self.get_logger().info('[*] Requesting grasp pose from GraspNet...')
-            grasp_response = self.request_grasp(object_name, response.bbox_2d, object_center_3d)
+            response.success = True
+            response.message = f"Object '{object_name}' detected successfully"
             
-            if grasp_response is not None and grasp_response.success:
-                self.get_logger().info(f'[*] Grasp pose received: score={grasp_response.score:.3f}, width={grasp_response.gripper_width:.3f}m')
-                # Note: The grasp pose is already published by GraspNet node to /graspnet/grasps
-                # We just log it here, the response from detection service doesn't include grasp
-            else:
-                self.get_logger().warning('[*] Failed to get grasp pose from GraspNet')
+            self.get_logger().info(f'[*] Object detected: {object_name}, confidence: {response.confidence:.3f}')
+            self.get_logger().info(f'[*] 2D bbox: {response.bbox_2d}')
             
             return response
             
@@ -245,7 +233,7 @@ class YOLODetectionNode(Node):
             
             for i in range(len(boxes)):
                 conf = float(confidences[i])
-                if conf >= 0.3:
+                if conf >= 0.2:
                     detected_name = detection.names[int(classes[i])]
                     high_conf_indices.append(i)
                     high_conf_objects.append({
@@ -352,36 +340,6 @@ class YOLODetectionNode(Node):
             self.get_logger().error(f'Error calculating 3D center: {e}')
             return None
     
-    def request_grasp(self, object_name, bbox_2d, object_center_3d=None):
-        """Request grasp pose from GraspNet service."""
-        try:
-            # Wait for service to be available
-            if not self.grasp_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().warning('GraspNet service not available')
-                return None
-            
-            # Create request with 2D bounding box and 3D center
-            request = GraspRequest.Request()
-            request.object_name = object_name
-            request.bbox_2d = bbox_2d
-            request.object_center_3d = object_center_3d if object_center_3d is not None else []
-            
-            # Call service synchronously
-            future = self.grasp_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=30.0)
-            
-            if future.done():
-                response = future.result()
-                return response
-            else:
-                self.get_logger().error('GraspNet service call timed out')
-                return None
-                
-        except Exception as e:
-            self.get_logger().error(f'Error calling GraspNet service: {e}')
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-            return None
 
 
 def main(args=None):

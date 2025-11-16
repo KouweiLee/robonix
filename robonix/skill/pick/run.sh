@@ -5,4 +5,6 @@
 source /opt/ros/humble/setup.bash
 source /home/syswonder/lgw/robonix/robonix/driver/graspnet/install/setup.bash
 
-python3 pick.py 'box'
+# python3 pick.py 'illuminate'
+python3 pick.py 'locker'
+

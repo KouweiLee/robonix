@@ -8,6 +8,9 @@ string object_name
 # 2D bounding box in pixel coordinates [x_min, y_min, x_max, y_max]
 float64[] bbox_2d
 
+# 3D center position of the object in camera frame [x, y, z] in meters
+float64[] object_center_3d
+
 # Detection confidence score
 float32 confidence
 

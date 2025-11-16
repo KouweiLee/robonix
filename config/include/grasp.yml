@@ -1,0 +1,16 @@
+driver:
+  - piper_ros
+  - yoloe
+
+  # - unilidar_L2
+capability:
+  - vision
+skill:
+  - pick
+  - vision
+brain:
+  - test_brian
+
+
+
+
