@@ -1,7 +1,7 @@
 import os
 import yaml
 from log import logger
-from constant import BASE_PATH
+from constant import BASE_PATH, ROBONIX_PATH
 
 
 class BaseNode:
@@ -136,7 +136,7 @@ def get_node_details(config_path: str) -> list[BaseNode]:
         if entries is None:
             logger.error(f"No entries found in {base}")
             continue
-        base_dir_path = os.path.join(BASE_PATH, base)
+        base_dir_path = os.path.join(ROBONIX_PATH, base)
         if not os.path.exists(base_dir_path):
             logger.error(
                 f"Error: The 'base' directory was not found at '{base_dir_path}'"

@@ -1,13 +1,14 @@
 driver:
   - piper_ros
   - yoloe
-
+  - OrbbecSDK_ROS2
+  - graspnet
   # - unilidar_L2
 capability:
-  - vision
+  # - vision
 skill:
   - pick
-  - vision
+  # - vision
 brain:
   - test_brian
 

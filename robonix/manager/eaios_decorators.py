@@ -11,10 +11,10 @@ from node import get_entry_name
 
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-from constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH
+from constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH, ROBONIX_PATH
 
-if os.path.dirname(BASE_PATH) not in sys.path:
-    sys.path.append(os.path.dirname(BASE_PATH))
+if os.path.dirname(ROBONIX_PATH) not in sys.path:
+    sys.path.append(os.path.dirname(ROBONIX_PATH))
 
 from robonix.manager.log import logger
 
@@ -180,6 +180,7 @@ class eaios:
 
     @staticmethod
     def scan_dir(base_package: str, base_dir: str):
+        logger.debug(f"Scanning directory: {base_dir}")
         for root, dirs, files in os.walk(base_dir):
             if "__pycache__" in root:
                 continue
@@ -199,6 +200,9 @@ class eaios:
                 for file in files:
                     if file == "api.py":
                         full_path = os.path.join(root, file)
+                        if "venv" in full_path.split(os.sep):
+                            logger.debug(f"Skipping venv-contained path: {full_path}")
+                            continue
                         rel_path = os.path.relpath(full_path, base_dir)
                         module_parts = rel_path[:-3].replace(os.sep, ".")
                         module_path = f"{base_package}.{module_parts}"
@@ -267,7 +271,7 @@ def package_init(config_path: str):
         for entry in entrys:
             entry_name, entry_content = get_entry_name(entry)
             
-            entry_dir = os.path.join(BASE_PATH, base, entry_name)
+            entry_dir = os.path.join(ROBONIX_PATH, base, entry_name)
             logger.debug(f"Entry directory: {entry_dir}")
             if not os.path.exists(entry_dir):
                 logger.error(f"The '{entry_dir}' directory was not found at '{base}'")

@@ -106,25 +106,56 @@ class YOLODetectionNode(Node):
         self.get_logger().info('[*] YOLO Detection Node started')
         self.get_logger().info('[*] Service available at: /yolo/detect_object')
         self.get_logger().info('[*] Detection image topic: /yolo/detection_image')
+
+    def check_msg(self, msg, name="image"):
+        """Check ROS Image message integrity."""
+        try:
+            data_len = len(msg.data)
+            expected = msg.step * msg.height
+
+            print(f"\n[{name}] encoding={msg.encoding}")
+            print(f"[{name}] width={msg.width}, height={msg.height}, step={msg.step}")
+            print(f"[{name}] data_len={data_len}, expected={expected}")
+
+            # Empty or invalid size
+            if msg.width == 0 or msg.height == 0:
+                print(f"ERROR: {name} has zero width/height!")
+
+            # Inconsistent buffer length
+            if data_len != expected:
+                print(f"ERROR: {name} buffer mismatch! (data_len={data_len}, expected={expected})")
+
+        except Exception as e:
+            print(f"check_msg({name}) exception: {e}")
+
     
     def camera_callback(self, color_msg, depth_msg, camera_info_msg):
-        """Synchronized callback for camera data."""
         try:
-            # Convert color image
-            color_image = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
-            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            
-            # Convert depth image
-            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
-            
-            # Store synchronized data
+            # self.check_msg(color_msg, "color_msg")
+            # self.check_msg(depth_msg, "depth_msg")
+
+            # 1) DON'T ask cv_bridge to convert rgb8 -> bgr8
+            color_image = self.bridge.imgmsg_to_cv2(
+                color_msg, desired_encoding='passthrough'
+            )
+            # color_image is RGB already because msg.encoding = rgb8
+            # If your model wants RGB, you're done.
+            # If you want BGR for OpenCV usage, do:
+            # color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
+
+            depth_image = self.bridge.imgmsg_to_cv2(
+                depth_msg, desired_encoding='passthrough'
+            )
+
             with self.data_lock:
                 self.latest_color_image = color_image
                 self.latest_depth_image = depth_image
                 self.latest_camera_info = camera_info_msg
-                
+
         except Exception as e:
             self.get_logger().error(f'Error in camera callback: {e}')
+
+
     
     def handle_detection_request(self, request, response):
         """Handle object detection service request."""

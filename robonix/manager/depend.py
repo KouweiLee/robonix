@@ -1,7 +1,7 @@
 import os
 import yaml
 from collections import defaultdict
-from constant import BASE_PATH
+from constant import BASE_PATH, ROBONIX_PATH
 from log import logger
 from node import get_entry_name
 
@@ -62,6 +62,7 @@ def check_depend(config_path):
 
     config = {}
     config_path = os.path.join(BASE_PATH, config_path)
+    print(BASE_PATH, config_path)
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -73,7 +74,7 @@ def check_depend(config_path):
             logger.warning(f"No entries found in {base}")
             continue
 
-        base_dir_path = os.path.join(BASE_PATH, base)
+        base_dir_path = os.path.join(ROBONIX_PATH, base)
         if not os.path.exists(base_dir_path):
             logger.error(f"Base directory not found at '{base_dir_path}'")
             return []
