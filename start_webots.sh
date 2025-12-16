@@ -1,4 +1,4 @@
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 
 # ensure all ros2 processes are stopped
 bash stop.sh

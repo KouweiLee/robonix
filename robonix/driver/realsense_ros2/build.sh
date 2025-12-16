@@ -4,7 +4,7 @@
 set -e
 
 echo "Building realsense_ros2 packages..."
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 echo "realsense_ros2 build completed successfully!"

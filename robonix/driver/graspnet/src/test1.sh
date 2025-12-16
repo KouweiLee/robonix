@@ -10,7 +10,7 @@ export PYTHONPATH=/opt/ros/humble/lib/python3.10/site-packages:$PYTHONPATH
 
 # Source ROS2 Humble setup
 if [ -f "/opt/ros/humble/setup.bash" ]; then
-    source /opt/ros/humble/setup.bash
+    #source /opt/ros/humble/setup.bash
     echo "[*] Sourced ROS2 Humble setup"
 fi
 

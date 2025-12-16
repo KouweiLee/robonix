@@ -4,7 +4,7 @@
 set -e
 
 echo "Building ranger_ros2 packages..."
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 
 echo "ranger_ros2 build completed successfully!"

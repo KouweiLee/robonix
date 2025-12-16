@@ -16,7 +16,7 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_LOCALHOST_ONLY=0
 export ROS_IP=$(hostname -I| awk '{for(i=1;i<=NF;i++)if($i~/^192/)print $i}')
 
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 
 if [ -z "$ROS_IP" ]; then
     echo "ROS_IP is not set, devices connected through ethernet will not be able to connect to this node!"

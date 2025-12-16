@@ -29,7 +29,7 @@ pip install openai-whisper torch numpy
 sudo apt install alsa-utils ffmpeg
 
 # ROS 2 依赖（假设你已经配置好工作区）
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 
 bash run.sh
 ```

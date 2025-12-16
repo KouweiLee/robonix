@@ -2,10 +2,12 @@
 """
 Pick skill - Request object detection and grasp pose generation
 """
+import time
 
 import rclpy
 from rclpy.node import Node
 from graspnet_msgs.srv import ObjectDetectionRequest, GraspRequest
+from graspnet_msgs.msg import PiperStatusMsg
 from geometry_msgs.msg import PoseStamped
 
 
@@ -28,8 +30,21 @@ class PickClient:
         self.grasp_client = self.node.create_client(
             GraspRequest,
             '/graspnet/grasp_request')
+
+        self.current_arm_status = None
+        self.arm_status_sub = self.node.create_subscription(
+            PiperStatusMsg,
+            '/arm_status',
+            self.arm_status_callback,
+            10
+        )
         
         self.node.get_logger().info('[*] Pick client initialized')
+
+    def arm_status_callback(self, msg):
+        """Callback for arm status."""
+        print(f'[*] Arm status: {msg.arm_status}')
+        self.current_arm_status = msg.arm_status
     
     def _call_service(self, client, request, service_name, timeout):
         """Helper method to call a service and wait for response."""
@@ -81,40 +96,62 @@ class PickClient:
         if not self.grasp_client.wait_for_service(timeout_sec=5.0):
             self.node.get_logger().error('GraspNet service not available')
             return None
+        for retry in range(5):
+            grasp_request = GraspRequest.Request()
+            grasp_request.object_name = object_name
+            grasp_request.bbox_2d = detection_response.bbox_2d
+            grasp_request.object_center_3d = detection_response.object_center_3d if detection_response.object_center_3d else []
+            grasp_request.retry = retry
+            
+            self.node.get_logger().info('[*] Calling GraspNet service...')
+            grasp_response = self._call_service(
+                self.grasp_client, grasp_request, 'GraspNet', timeout)
+            
+            if grasp_response is None or not grasp_response.success:
+                self.node.get_logger().error(f'Grasp generation failed: {grasp_response.message if grasp_response is not None else "No response received"}')
+                continue
+            
+            # Build result dictionary
+            result = {
+                'success': True,
+                'object_name': object_name,
+                'pose': grasp_response.grasp_pose,
+                'gripper_width': grasp_response.gripper_width,
+                'score': grasp_response.score,
+                'bbox_2d': list(detection_response.bbox_2d) if detection_response.bbox_2d else [],
+                'object_center_3d': list(detection_response.object_center_3d) if detection_response.object_center_3d else [],
+                'confidence': detection_response.confidence
+            }
         
-        grasp_request = GraspRequest.Request()
-        grasp_request.object_name = object_name
-        grasp_request.bbox_2d = detection_response.bbox_2d
-        grasp_request.object_center_3d = detection_response.object_center_3d if detection_response.object_center_3d else []
-        
-        self.node.get_logger().info('[*] Calling GraspNet service...')
-        grasp_response = self._call_service(
-            self.grasp_client, grasp_request, 'GraspNet', timeout)
-        
-        if grasp_response is None or not grasp_response.success:
-            self.node.get_logger().error(f'Grasp generation failed: {grasp_response.message if grasp_response is not None else "No response received"}')
-            return None
-        
-        # Build result dictionary
-        result = {
-            'success': True,
-            'object_name': object_name,
-            'pose': grasp_response.grasp_pose,
-            'gripper_width': grasp_response.gripper_width,
-            'score': grasp_response.score,
-            'bbox_2d': list(detection_response.bbox_2d) if detection_response.bbox_2d else [],
-            'object_center_3d': list(detection_response.object_center_3d) if detection_response.object_center_3d else [],
-            'confidence': detection_response.confidence
-        }
-        
-        self.node.get_logger().info(f'[*] Pick request completed successfully!')
-        self.node.get_logger().info(f'[*] Grasp pose: x={result["pose"].pose.position.x:.3f}, '
-                                   f'y={result["pose"].pose.position.y:.3f}, '
-                                   f'z={result["pose"].pose.position.z:.3f}')
-        self.node.get_logger().info(f'[*] Gripper width: {result["gripper_width"]:.3f}m')
-        self.node.get_logger().info(f'[*] Grasp score: {result["score"]:.3f}')
-        
-        return result
+            self.node.get_logger().info(f'[*] Pick request completed successfully!')
+            self.node.get_logger().info(f'[*] Grasp pose: x={result["pose"].pose.position.x:.3f}, '
+                                    f'y={result["pose"].pose.position.y:.3f}, '
+                                    f'z={result["pose"].pose.position.z:.3f}')
+            self.node.get_logger().info(f'[*] Gripper width: {result["gripper_width"]:.3f}m')
+            self.node.get_logger().info(f'[*] Grasp score: {result["score"]:.3f}')
+
+            # ===== Wait for arm_status == 0 =====
+            self.node.get_logger().info('[*] Waiting for arm_status == 0 ...')
+            start_time = time.time()
+            need_retry = False
+            time.sleep(2.0)
+            while rclpy.ok():
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                if self.current_arm_status == 0:
+                    self.node.get_logger().info('[*] Arm is normal (arm_status=0), stopping retry.')
+                    return result
+                else:
+                    self.node.get_logger().info(f'[*] Current arm_status={self.current_arm_status}, waiting...')
+                if time.time() - start_time > 3: # 3 seconds timeout
+                    self.node.get_logger().warn('[*] Timeout waiting for arm_status==0, retrying next grasp...')
+                    need_retry = True
+                    break  # retry
+            if need_retry:
+                self.node.get_logger().info('[*] Retrying next grasp...')
+                continue
+            return result
+        self.node.get_logger().error('All grasp generation attempts failed')
+        return None
     
     def shutdown(self):
         """Clean shutdown."""
@@ -149,31 +186,34 @@ if __name__ == '__main__':
         sys.exit(1)
     
     object_name = sys.argv[1]
+    # objects = [object_name,"neon light","keyboard", "skylight"]
+    objects = [object_name,"toothbrush"]
     
     try:
-        result = pick(object_name)
-        
-        if result:
-            print("\n" + "="*50)
-            print("PICK OPERATION SUCCESSFUL")
-            print("="*50)
-            print(f"Object: {result['object_name']}")
-            print(f"Confidence: {result['confidence']:.3f}")
-            print(f"Grasp pose:")
-            print(f"  Position: ({result['pose'].pose.position.x:.3f}, "
-                  f"{result['pose'].pose.position.y:.3f}, "
-                  f"{result['pose'].pose.position.z:.3f})")
-            print(f"  Orientation: ({result['pose'].pose.orientation.x:.3f}, "
-                  f"{result['pose'].pose.orientation.y:.3f}, "
-                  f"{result['pose'].pose.orientation.z:.3f}, "
-                  f"{result['pose'].pose.orientation.w:.3f})")
-            print(f"Gripper width: {result['gripper_width']:.3f}m")
-            print("="*50)
-        else:
-            print("\n" + "="*50)
-            print("PICK OPERATION FAILED")
-            print("="*50)
-            sys.exit(1)
+        for object_name in objects:
+            result = pick(object_name)
+            
+            if result:
+                print("\n" + "="*50)
+                print("PICK OPERATION SUCCESSFUL")
+                print("="*50)
+                print(f"Object: {result['object_name']}")
+                print(f"Confidence: {result['confidence']:.3f}")
+                print(f"Grasp pose:")
+                print(f"  Position: ({result['pose'].pose.position.x:.3f}, "
+                    f"{result['pose'].pose.position.y:.3f}, "
+                    f"{result['pose'].pose.position.z:.3f})")
+                print(f"  Orientation: ({result['pose'].pose.orientation.x:.3f}, "
+                    f"{result['pose'].pose.orientation.y:.3f}, "
+                    f"{result['pose'].pose.orientation.z:.3f}, "
+                    f"{result['pose'].pose.orientation.w:.3f})")
+                print(f"Gripper width: {result['gripper_width']:.3f}m")
+                print("="*50)
+            else:
+                print("\n" + "="*50)
+                print("PICK OPERATION FAILED")
+                print("="*50)
+        sys.exit(1)
     
     except KeyboardInterrupt:
         print("\nInterrupted by user")

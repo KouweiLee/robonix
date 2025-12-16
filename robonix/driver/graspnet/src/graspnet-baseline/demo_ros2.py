@@ -103,15 +103,45 @@ class GraspNetRos2Node(Node):
         self.get_logger().info(f'[*] Publishing grasps to: {cfgs.grasp_topic}')
         self.get_logger().info(f'[*] Service available at: /graspnet/grasp_request')
         self.get_logger().info('[*] Node will process frames only when service is called')
+        self.pre_grasp_result = None
     
     def color_callback(self, msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            enc = msg.encoding.lower()
+
+            # 1) 先 passthrough，避开 cv_bridge 内部 cvtColor 路径
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+
+            # 2) 根据真实 encoding 决定是否转换到 RGB
+            if enc == "bgr8":
+                # OpenCV default is BGR, convert to RGB if your downstream wants RGB
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            elif enc == "rgb8":
+                # Already RGB, no need to convert
+                pass
+            elif enc in ("mono8", "8uc1"):
+                # Gray to RGB if you need 3-channel RGB
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2RGB)
+            elif enc == "rgba8":
+                # RGBA to RGB
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2RGB)
+            elif enc == "bgra8":
+                # BGRA to RGB
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGRA2RGB)
+            else:
+                # Fallback: try to interpret as RGB-family without cv_bridge conversion
+                # You can log once if needed.
+                self.get_logger().warn(f"Unexpected color encoding: {msg.encoding}, using passthrough.")
+
+            # 3) Make an owned copy to avoid lifetime issues across threads
+            cv_image = cv_image.copy()
+
             with self.data_lock:
                 self.color_image = cv_image
+
         except Exception as e:
             self.get_logger().error(f'Error converting color image: {e}')
+
     
     def depth_callback(self, msg):
         try:
@@ -130,6 +160,8 @@ class GraspNetRos2Node(Node):
         object_name = request.object_name
         bbox_2d = list(request.bbox_2d) if len(request.bbox_2d) == 4 else None
         object_center_3d = list(request.object_center_3d) if len(request.object_center_3d) == 3 else None
+
+        retry = request.retry
         
         self.get_logger().info(f'[*] Received grasp request for object: {object_name}')
         if bbox_2d:
@@ -151,15 +183,26 @@ class GraspNetRos2Node(Node):
                 cam_info = self.camera_info
             
             # Process frame with 2D bbox and 3D center constraints
-            grasp_result = self.process_frame(color_img, depth_img, cam_info, bbox_2d=bbox_2d, object_center_3d=object_center_3d)
-            
+            if retry == 0:
+                grasp_result = self.process_frame(color_img, depth_img, cam_info, bbox_2d=bbox_2d, object_center_3d=object_center_3d)
+                self.pre_grasp_result = grasp_result
+                print(grasp_result)
+            elif retry >= 10:
+                self.node.get_logger().error(f'[*] Retry {retry}: Maximum retries reached, aborting grasp request')
+                response.success = False
+                response.message = 'Maximum retries reached'
+                return response
+            else:
+                self.get_logger().info(f'[*] Retry {retry}: Using previous grasp result')
+                grasp_result = self.pre_grasp_result
             if grasp_result is None:
                 response.success = False
                 response.message = 'Failed to generate grasp pose'
                 self.get_logger().warning(response.message)
                 return response
             
-            best_grasp = grasp_result['grasp']
+            best_grasp = grasp_result['grasp'][retry % len(grasp_result['grasp'])]
+            self.get_logger().info(f'[*] retry {retry} Grasp pose: score={best_grasp.score:.3f}, width={best_grasp.width:.3f}m')
             
             # Populate response
             response.grasp_pose = self.grasp_to_pose_stamped(best_grasp)
@@ -257,8 +300,8 @@ class GraspNetRos2Node(Node):
                 x_median, y_median = np.median(x_coords), np.median(y_coords)
                 x_std, y_std = np.std(x_coords), np.std(y_coords)
                 
-                x_threshold = 0.8 * x_std
-                y_threshold = 2.0 * y_std
+                x_threshold = 1 * x_std
+                y_threshold = 2.5 * y_std
                 xy_outlier_mask = (np.abs(x_coords - x_median) <= x_threshold) & (np.abs(y_coords - y_median) <= y_threshold)
                 
                 xy_distances = np.sqrt(x_coords**2 + y_coords**2)
@@ -328,7 +371,7 @@ class GraspNetRos2Node(Node):
                 self.get_logger().info(f'[*] Filtering grasps by 3D distance to object center: [{obj_center[0]:.3f}, {obj_center[1]:.3f}, {obj_center[2]:.3f}]m')
                 
                 # Distance threshold: 0.2 meters (lenient)
-                distance_threshold = 0.2
+                distance_threshold = 1
                 
                 # Filter grasps whose 3D position is close to object center
                 valid_grasps = []
@@ -368,8 +411,9 @@ class GraspNetRos2Node(Node):
             gg.sort_by_score()
             
             # Keep only the best grasp for visualization
-            if not cfgs.headless and len(gg) > 0:
-                self.visualize_grasps(gg[:1], vis_cloud)
+            # if not cfgs.headless and len(gg) > 0:
+            if not cfgs.headless:
+                self.visualize_grasps(gg[:10], vis_cloud)
             
             processing_time = time.time() - start_time
             
@@ -377,7 +421,7 @@ class GraspNetRos2Node(Node):
                 self.get_logger().warning('No grasps found after filtering')
                 return None
             
-            best_grasp = gg[0]
+            best_grasp = gg[:10]
             grasp_data = {
                 'grasp': best_grasp,
                 'processing_time': processing_time,
@@ -385,7 +429,7 @@ class GraspNetRos2Node(Node):
                 'timestamp': time.time()
             }
 
-            self.get_logger().info(f'Grasp found: score={best_grasp.score:.3f}, width={best_grasp.width:.3f}m, inference={inference_time:.2f}s, total={processing_time:.2f}s best grasp = {best_grasp}')
+            self.get_logger().info(f'Grasp found: score={best_grasp[0].score:.3f}, width={best_grasp[0].width:.3f}m, inference={inference_time:.2f}s, total={processing_time:.2f}s best grasp = {best_grasp}')
             return grasp_data
             
         except Exception as e:

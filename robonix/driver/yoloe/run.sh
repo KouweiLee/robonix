@@ -2,7 +2,7 @@
 
 # YOLO Object Detection Node Startup Script
 
-source /opt/ros/humble/setup.bash
+#source /opt/ros/humble/setup.bash
 source ../graspnet/install/setup.bash
 
 # Set Python path for ROS2 packages
