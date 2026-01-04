@@ -4,5 +4,8 @@ bash init.sh
 # ensure all ros2 processes are stopped
 bash stop.sh
 
-cd robonix
-python3 manager/boot.py --config ../config/include/ranger_test.yml
+source robonix/driver/graspnet/install/setup.bash
+
+# cd robonix
+python3 robonix/manager/boot.py --config config/include/ranger_test.yml
+# python -m robonix.manager.boot  --config ../config/include/ranger_test.yml

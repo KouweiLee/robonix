@@ -20,6 +20,7 @@ import message_filters
 # Import custom service messages
 try:
     from graspnet_msgs.srv import ObjectDetectionRequest
+    from graspnet_msgs.msg import DetectedObject, DetectedObjects
 except Exception as e:
     print("[!] Missing ROS2 service types 'graspnet_msgs/ObjectDetectionRequest'.")
     print("    Please build the graspnet_msgs package before running:")
@@ -103,9 +104,21 @@ class YOLODetectionNode(Node):
             '/yolo/detection_image',
             10)
         
+        # Create publisher for detected objects
+        self.detected_objects_pub = self.create_publisher(
+            DetectedObjects,
+            '/yolo/detect_objects',
+            10)
+        
+        # Create timer for periodic detection (10Hz)
+        self.detection_timer = self.create_timer(
+            1,  # 10Hz = 0.1 seconds
+            self.periodic_detection_callback)
+        
         self.get_logger().info('[*] YOLO Detection Node started')
         self.get_logger().info('[*] Service available at: /yolo/detect_object')
         self.get_logger().info('[*] Detection image topic: /yolo/detection_image')
+        self.get_logger().info('[*] Detected objects topic: /yolo/detect_objects (10Hz)')
 
     def check_msg(self, msg, name="image"):
         """Check ROS Image message integrity."""
@@ -247,6 +260,11 @@ class YOLODetectionNode(Node):
             # The plot() method returns the image with bounding boxes and labels
             annotated_img = detection.plot()  # Returns BGR image with annotations
             result['annotated_image'] = annotated_img
+
+            save_dir = "/home/syswonder/lgw/robonix/robonix/driver/yoloe"
+            filepath = os.path.join(save_dir, "saved_image.jpg")
+            cv2.imwrite(filepath, annotated_img)
+            self.get_logger().info(f'[✓] Annotated image saved to: {filepath}')
             
             if detection is None or len(detection.boxes) == 0:
                 result['message'] = f"No objects detected in image"
@@ -342,7 +360,7 @@ class YOLODetectionNode(Node):
             valid_depths = depth_roi[(depth_roi > 0) & (depth_roi < 3000)]  # depth in mm, max 3m
             
             if len(valid_depths) == 0:
-                self.get_logger().warning('No valid depth values in object bounding box')
+                self.get_logger().warning(f'No valid depth values in object bounding box {x_min, y_min, x_max, y_max}')
                 return None
             
             # Calculate median depth (more robust than mean)
@@ -370,6 +388,111 @@ class YOLODetectionNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error calculating 3D center: {e}')
             return None
+    
+    def periodic_detection_callback(self):
+        """Periodic callback to detect all objects and publish to topic."""
+        try:
+            # Get current camera data (synchronized)
+            with self.data_lock:
+                if self.latest_color_image is None or self.latest_depth_image is None or self.latest_camera_info is None:
+                    # Silently skip if camera data not available yet
+                    return
+                
+                color_img = self.latest_color_image.copy()
+                depth_img = self.latest_depth_image.copy()
+                cam_info = self.latest_camera_info
+            
+            # Detect all objects using YOLO
+            detection_result = self.detect_all_objects(color_img, depth_img, cam_info)
+            
+            if not detection_result['success']:
+                # No objects detected, publish empty message
+                msg = DetectedObjects()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'camera_color_optical_frame'
+                msg.objects = []
+                self.detected_objects_pub.publish(msg)
+                return
+            
+            # Create DetectedObjects message
+            msg = DetectedObjects()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'camera_color_optical_frame'
+            
+            # Populate detected objects
+            for obj_info in detection_result['objects']:
+                detected_obj = DetectedObject()
+                detected_obj.object_name = obj_info['name']
+                detected_obj.bbox_2d = obj_info['bbox_2d']
+                detected_obj.confidence = obj_info['confidence']
+                
+                # Calculate 3D center
+                object_center_3d = self.calculate_object_center_3d(
+                    obj_info['bbox_2d'], depth_img, cam_info)
+                
+                if object_center_3d is not None:
+                    detected_obj.object_center_3d = object_center_3d
+                else:
+                    detected_obj.object_center_3d = []
+                
+                msg.objects.append(detected_obj)
+            
+            # Publish detected objects
+            self.detected_objects_pub.publish(msg)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in periodic detection: {e}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+    
+    def detect_all_objects(self, color_img, depth_img, cam_info):
+        """Detect all objects in the image and return their information."""
+        result = {
+            'success': False,
+            'message': '',
+            'objects': []
+        }
+        
+        try:
+            # Run YOLOE inference (detects all predefined classes)
+            results = self.yolo_model.predict(source=color_img, device="cuda:0", verbose=False)
+            detection = results[0]
+            
+            if detection is None or len(detection.boxes) == 0:
+                result['message'] = "No objects detected in image"
+                return result
+            
+            # Extract detection results
+            boxes = detection.boxes.xyxy.cpu().numpy()
+            confidences = detection.boxes.conf.cpu().numpy()
+            classes = detection.boxes.cls.cpu().numpy()
+            
+            # Filter detections by confidence >= 0.2
+            for i in range(len(boxes)):
+                conf = float(confidences[i])
+                if conf >= 0.2:
+                    detected_name = detection.names[int(classes[i])]
+                    x1, y1, x2, y2 = boxes[i]
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    
+                    obj_info = {
+                        'name': detected_name,
+                        'confidence': float(conf),
+                        'bbox_2d': [float(x1), float(y1), float(x2), float(y2)]
+                    }
+                    result['objects'].append(obj_info)
+            
+            if len(result['objects']) > 0:
+                result['success'] = True
+                result['message'] = f"Detected {len(result['objects'])} objects"
+            else:
+                result['message'] = "No objects detected with confidence >= 0.2"
+            
+            return result
+            
+        except Exception as e:
+            result['message'] = f'Detection error: {str(e)}'
+            return result
     
 
 

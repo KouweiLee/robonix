@@ -3,12 +3,13 @@ driver:
   - yoloe
   - OrbbecSDK_ROS2
   - graspnet
+  - easy_handeye2
   # - unilidar_L2
 capability:
-  # - vision
+  - vision
 skill:
   - pick
-  # - vision
+  - vision
 brain:
   - test_brian
 

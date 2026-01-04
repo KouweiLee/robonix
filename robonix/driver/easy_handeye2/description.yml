@@ -1,0 +1,6 @@
+name: "easy_handeye2"
+version: "1.0.0"
+author: "syswonder"
+start_on_boot: true
+startup_command: "bash run.sh"
+description: "easy_handeye2 calibration"

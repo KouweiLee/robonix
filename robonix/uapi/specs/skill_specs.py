@@ -228,4 +228,13 @@ EOS_SKILL_SPECS = {
         "output": EOS_TYPE_SpatialLM_WorldResult,
         "dependencies": ["cap_get_pose"],
     },
+    "skl_grasp_object": {
+        "description": "Grasp the specified object",
+        "type": EOS_SkillType.SKILL,
+        "input": {"object_name": str},
+        "output": bool,
+        "dependencies": [
+            "skl_detect_objs",
+        ],
+    },
 }

@@ -15,10 +15,10 @@ amcl:
     resample_interval: 1
     set_initial_pose: true
     initial_pose:
-      x: 3.2
-      y: -1.3
+      x: 28.83777255787819
+      y: -1.3764122022097915
       z: 0.0
-      yaw: 0.0
+      yaw: -1.5598185730243177
 
 map_server:
   ros__parameters:

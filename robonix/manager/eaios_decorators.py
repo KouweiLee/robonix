@@ -7,11 +7,11 @@ from mcp.server.fastmcp import FastMCP
 import yaml
 import sys
 import inspect
-from node import get_entry_name
 
 if os.path.abspath(os.path.dirname(__file__)) not in sys.path:
     sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from constant import BASE_SKILL_PATH, INIT_FILE, EXPORT_FILE, BASE_PATH, ROBONIX_PATH
+from node import get_entry_name
 
 if os.path.dirname(ROBONIX_PATH) not in sys.path:
     sys.path.append(os.path.dirname(ROBONIX_PATH))

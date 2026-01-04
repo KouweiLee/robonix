@@ -11,11 +11,11 @@ from sensor_msgs.msg import Range
 import sys
 
 import sys
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
+# root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+# if root_dir not in sys.path:
+#     sys.path.append(root_dir)
 
-print(root_dir)
+# print(root_dir)
 
 from robonix.manager.eaios_decorators import eaios
 from robonix.uapi.graph.entity import Entity
@@ -52,7 +52,7 @@ def move_to_ab_pos(self_entity, x, y, yaw) -> str:
         移动操作的结果状态字符串
     """
     #TODO how read dep
-    return set_goal(self_entity, x,y,yaw)
+    return self_entity.cap_set_goal(x=x, y=y, yaw=yaw)
 
 @eaios.api
 @eaios.caller

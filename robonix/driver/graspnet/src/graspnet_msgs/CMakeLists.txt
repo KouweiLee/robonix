@@ -15,6 +15,8 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GraspPose.msg"
   "msg/PiperStatusMsg.msg"
+  "msg/DetectedObject.msg"
+  "msg/DetectedObjects.msg"
   "srv/ObjectDetectionRequest.srv"
   "srv/GraspRequest.srv"
   DEPENDENCIES geometry_msgs std_msgs

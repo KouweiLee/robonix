@@ -17,7 +17,8 @@ def cap_camera_rgb(camera_name, timeout_sec=5.0):
     Returns:
         Returns the image in OpenCV format if successful, or None if timeout occurs.
     """
-    topic = f"/{camera_name}/camera/color/image_raw"
+    # topic = f"/{camera_name}/camera/color/image_raw"
+    topic = f"/camera/color/image_raw"
     node = CameraImageGetter(topic)
     end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
     while rclpy.ok() and node.image is None and node.get_clock().now().nanoseconds < end_time:
@@ -38,8 +39,11 @@ def cap_camera_dep_rgb(camera_name, timeout_sec=5.0):
     Returns:
         Returns a tuple (rgb_image, depth_image) in OpenCV format if successful, or (None, None) if timeout occurs.
     """
-    rgb_topic = f"/{camera_name}/camera/color/image_raw"
-    depth_topic = f"/{camera_name}/camera/aligned_depth_to_color/image_raw"
+    # rgb_topic = f"/{camera_name}/camera/color/image_raw"
+    # depth_topic = f"/{camera_name}/camera/aligned_depth_to_color/image_raw"
+
+    rgb_topic = f"/camera/color/image_raw"
+    depth_topic = f"/camera/depth_to_color/image_raw"
     node = CameraRGBDGetter(rgb_topic, depth_topic)
     end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
     while rclpy.ok() and (node.rgb_image is None or node.depth_image is None) and node.get_clock().now().nanoseconds < end_time:
@@ -69,7 +73,8 @@ def cap_camera_info(camera_name, timeout_sec=5.0) -> dict:
         }
         Returns the camera info dictionary if successful, or None if timeout occurs.
     """
-    topic = f"/{camera_name}/camera/color/camera_info"
+    # topic = f"/{camera_name}/camera/color/camera_info"
+    topic = f"/camera/color/camera_info"
     node = CameraInfoGetter(topic)
     end_time = node.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
     while rclpy.ok() and node.camera_info is None and node.get_clock().now().nanoseconds < end_time:

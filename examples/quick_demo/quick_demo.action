@@ -1,0 +1,82 @@
+from robonix.uapi.specs.skill_specs import EntityPath
+from robonix.uapi.runtime.action import action, EOS_TYPE_ActionResult, get_runtime, action_print
+
+
+@action
+def get_detection(ranger_path: EntityPath):
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    result = ranger.skl_detect_objs(camera_name="camera")
+    action_print(f"result: {result}")
+
+    return result
+
+@action
+def grasp(ranger_path: EntityPath, object_name: str) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    result = ranger.skl_grasp_object(object_name=object_name)
+    action_print(f"result: {result}")
+
+
+    return EOS_TYPE_ActionResult.SUCCESS
+
+@action
+def move_ranger(ranger_path: EntityPath, x: float, y: float, yaw: float) -> EOS_TYPE_ActionResult:
+    runtime = get_runtime()
+    ranger = runtime.get_graph().get_entity_by_path(ranger_path)
+
+    if ranger is None:
+        action_print(f"ranger not found at path: {ranger_path}")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    #### CAP: cap_get_pose #######################
+    result: Optional[Tuple[float, float, float]] = ranger.cap_get_pose()
+    ##############################################
+
+    if result is None:
+        action_print("failed to get ranger pose before move to relative pos")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    x, y, yaw = result
+    action_print(f"ranger pose before move: x={x}, y={y}, yaw={yaw}")
+
+    # move forward 1 meter
+
+    #### SKL: skl_move_to_ab_pos ################
+    result = ranger.skl_move_to_ab_pos(x=x, y=y, yaw=yaw)
+    ##############################################
+
+    action_print(f"move to abs pos result: {result}")
+    if result != "Service set_goal response: True":
+        action_print("failed to move to absolute pos")
+        return EOS_TYPE_ActionResult.FAILURE
+
+    #### CAP: cap_get_pose #######################
+    result = ranger.cap_get_pose()
+    ##############################################
+
+    if result is None:
+        action_print("failed to get ranger pose after move to relative pos")
+        return EOS_TYPE_ActionResult.FAILURE
+    x, y, yaw = result
+    action_print(f"ranger pose after move: x={x}, y={y}, yaw={yaw}")
+
+    # test cap_pointcloud_to_file
+    # result = ranger.cap_pointcloud_to_file(filename="./examples/demo2/pointcloud.ply")
+    # if not result["success"]:
+    #     action_print("failed to save pointcloud to file")
+    #     return EOS_TYPE_ActionResult.FAILURE
+    # action_print(f"pointcloud saved to file: {result}")
+
+    return EOS_TYPE_ActionResult.SUCCESS
