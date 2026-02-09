@@ -36,10 +36,7 @@ From the **rust** directory, source the SDK and start robonix-core with environm
 ```bash
 cd rust
 eval $(make source-sdk)
-ROBONIX_WEB_ASSETS_DIR="$(pwd)/robonix-core/web" \
-ROBONIX_WEB_PORT=8000 \
-RUST_LOG=robonix_core=info \
-robonix-core
+./core.sh
 ```
 
 In another terminal (with `eval $(make source-sdk)` from `rust`): register the recipe, start services, and create tasks. See the main [rust/README.md](../../README.md) for full steps (Step 4–8).

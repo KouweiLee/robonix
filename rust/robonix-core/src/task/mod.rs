@@ -40,18 +40,6 @@ pub struct TaskManager {
     // Runtime-specific state
     semantic_map_update_interval: Duration,
     semantic_map_cache: Arc<Mutex<serde_json::Value>>, // System-wide cache for semantic map
-    task_plan_client: Arc<
-        Mutex<
-            Option<
-                ros2_client::service::Client<
-                    ros2_client::AService<
-                        crate::ros_idl::service_types::PlanTaskRequest,
-                        crate::ros_idl::service_types::PlanTaskResponse,
-                    >,
-                >,
-            >,
-        >,
-    >,
 }
 
 impl TaskManager {
@@ -79,7 +67,6 @@ impl TaskManager {
             node: node.clone(),
             semantic_map_update_interval: Duration::from_secs(5), // Update every 5 seconds
             semantic_map_cache: Arc::new(Mutex::new(serde_json::json!([]))), // Initialize with empty array
-            task_plan_client: Arc::new(Mutex::new(None)),
         });
 
         // Start runtime loop in background
@@ -349,16 +336,15 @@ impl TaskManager {
             update_interval
         );
         tokio::spawn(async move {
-            let mut interval = interval(update_interval);
             info!(
                 "semantic map cache update task started (interval: {:?})",
                 update_interval
             );
             loop {
-                interval.tick().await;
                 debug!("semantic map cache update tick");
                 Self::update_semantic_map_cache(&cache_clone, &service_registry_clone, &node_clone)
                     .await;
+                tokio::time::sleep(update_interval).await;
             }
         });
 
@@ -599,42 +585,36 @@ impl TaskManager {
                 return Err(format!("Invalid service type format: {}", service_type));
             };
 
-            let mut client_cache_guard = self.task_plan_client.lock().await;
-            let client = if let Some(c) = client_cache_guard.as_ref() {
-                c
-            } else {
-                let mut node_guard = self.node.lock().await;
-                let service_qos = crate::server::create_qos();
-                let service_name_parsed = match Name::parse(service_name) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        error!("failed to parse service name '{}': {}", service_name, e);
-                        return Err(format!("Failed to parse service name: {}", e));
-                    }
-                };
-
-                let new_client = match node_guard.create_client::<AService<
-                    crate::ros_idl::service_types::PlanTaskRequest,
-                    crate::ros_idl::service_types::PlanTaskResponse,
-                >>(
-                    ServiceMapping::Enhanced,
-                    &service_name_parsed,
-                    &service_type_parsed,
-                    service_qos.clone(),
-                    service_qos.clone(),
-                ) {
-                    Ok(c) => {
-                        debug!("[task_plan] created new service client and cached it");
-                        c
-                    }
-                    Err(e) => {
-                        error!("failed to create task_plan service client: {}", e);
-                        return Err(format!("Failed to create service client: {}", e));
-                    }
-                };
-                *client_cache_guard = Some(new_client);
-                client_cache_guard.as_ref().unwrap()
+            let mut node_guard = self.node.lock().await;
+            let service_qos = crate::server::create_qos();
+            let service_name_parsed = match Name::parse(service_name) {
+                Ok(n) => n,
+                Err(e) => {
+                    error!("failed to parse service name '{}': {}", service_name, e);
+                    return Err(format!("Failed to parse service name: {}", e));
+                }
             };
+
+            let client = match node_guard.create_client::<AService<
+                crate::ros_idl::service_types::PlanTaskRequest,
+                crate::ros_idl::service_types::PlanTaskResponse,
+            >>(
+                ServiceMapping::Enhanced,
+                &service_name_parsed,
+                &service_type_parsed,
+                service_qos.clone(),
+                service_qos.clone(),
+            ) {
+                Ok(c) => {
+                    debug!("[task_plan] created new service client");
+                    c
+                }
+                Err(e) => {
+                    error!("failed to create task_plan service client: {}", e);
+                    return Err(format!("Failed to create service client: {}", e));
+                }
+            };
+            drop(node_guard); // Release node lock before calling service
 
             let object_graph_str = serde_json::to_string(&task.context.object_graph)
                 .unwrap_or_else(|_| "[]".to_string());
@@ -685,68 +665,67 @@ impl TaskManager {
                 "[task_plan] calling service: task_id={}, description=\"{}\", object_graph_count={}",
                 task_id, request.description, object_count
             );
-            debug!(
-                "[task_plan] request details: description=\"{}\", object_graph={}",
-                request.description,
-                if object_graph_str.len() > 500 {
-                    format!(
-                        "{}... ({} chars)",
-                        &object_graph_str[..500],
-                        object_graph_str.len()
-                    )
-                } else {
-                    object_graph_str.clone()
-                }
-            );
 
             // Record start time
             let start_time = std::time::Instant::now();
+            let timeout_duration = Duration::from_secs(60);
+            let max_retries = 3;
+            let mut last_error = None;
+            let mut response_opt = None;
 
-            let result = timeout(Duration::from_secs(60), client.async_call_service(request)).await;
-
-            // Calculate elapsed time
-            let elapsed = start_time.elapsed();
-
-            match result {
-                Ok(Ok(response)) => {
-                    // Log response data and timing
-                    info!(
-                        "[task_plan] service response: task_id={}, rtdl_type={}, rtdl_length={}, elapsed={:?}",
-                        task_id,
-                        response.rtdl_type,
-                        response.rtdl.len(),
-                        elapsed
-                    );
+            for attempt in 0..max_retries {
+                if attempt > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     debug!(
-                        "[task_plan] response details: rtdl_type={}, rtdl_preview={}",
-                        response.rtdl_type,
-                        if response.rtdl.len() > 500 {
-                            format!(
-                                "{}... ({} chars)",
-                                &response.rtdl[..500],
-                                response.rtdl.len()
-                            )
-                        } else {
-                            response.rtdl.clone()
-                        }
+                        "[task_plan] retrying service call (attempt {}/{})",
+                        attempt + 1,
+                        max_retries
                     );
-                    (response.rtdl, response.rtdl_type)
                 }
-                Ok(Err(e)) => {
-                    error!(
-                        "[task_plan] service call failed: task_id={}, error={:?}, elapsed={:?}",
-                        task_id, e, elapsed
-                    );
-                    return Err(format!("Failed to call task_plan service: {:?}", e));
-                }
-                Err(_) => {
-                    error!(
-                        "[task_plan] service call timeout: task_id={}, elapsed={:?} (timeout=60s)",
-                        task_id, elapsed
-                    );
-                    return Err("Task plan service call timeout after 60s".to_string());
+
+                let result =
+                    timeout(timeout_duration, client.async_call_service(request.clone())).await;
+
+                match result {
+                    Ok(Ok(response)) => {
+                        let elapsed = start_time.elapsed();
+                        info!(
+                            "[task_plan] service response received: task_id={}, elapsed={:?}",
+                            task_id, elapsed
+                        );
+                        response_opt = Some(response);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        last_error = Some(format!("Service call error: {:?}", e));
+                        warn!(
+                            "[task_plan] attempt {} failed: {:?}",
+                            attempt + 1,
+                            last_error.as_ref().unwrap()
+                        );
+                    }
+                    Err(_) => {
+                        last_error = Some("Service call timeout".to_string());
+                        warn!(
+                            "[task_plan] attempt {} timed out",
+                            attempt + 1
+                        );
+                    }
                 }
             }
+
+            let response = match response_opt {
+                Some(r) => r,
+                None => {
+                    return Err(format!(
+                        "Task plan service call failed after {} attempts: {}",
+                        max_retries,
+                        last_error.unwrap_or_else(|| "Unknown error".to_string())
+                    ));
+                }
+            };
+
+            (response.rtdl, response.rtdl_type)
         };
 
         // Update task with RTDL and transition to Running
@@ -1054,11 +1033,6 @@ impl TaskManager {
         };
 
         let mut cache_guard = cache.lock().await;
-        let old_count = if let Some(arr) = cache_guard.as_array() {
-            arr.len()
-        } else {
-            0
-        };
         *cache_guard = object_graph.clone();
         drop(cache_guard);
 

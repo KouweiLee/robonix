@@ -138,9 +138,9 @@ where
 pub fn create_qos() -> QosPolicies {
     // Match official ros2_client demo QoS settings
     QosPolicyBuilder::new()
-        .history(policy::History::KeepLast { depth: 10 })
+        .history(policy::History::KeepLast { depth: 100 })
         .reliability(policy::Reliability::Reliable {
-            max_blocking_time: Duration::from_millis(100),
+            max_blocking_time: Duration::from_secs(1),
         })
         .durability(policy::Durability::Volatile)
         .deadline(Deadline(Duration::INFINITE))
