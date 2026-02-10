@@ -10,6 +10,7 @@ pub mod primitive;
 pub mod service;
 pub mod service_registry;
 pub mod skill;
+pub mod scheduler;
 pub mod task;
 pub mod test;
 
@@ -17,4 +18,5 @@ pub mod test;
 pub mod service_types {
     pub use super::service::semantic_map::*;
     pub use super::service::task_plan::*;
+    pub use super::scheduler::*;
 }

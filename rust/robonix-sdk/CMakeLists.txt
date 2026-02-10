@@ -51,6 +51,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # Task services
   "srv/task/SubmitTask.srv"
   "srv/task/TaskData.srv"
+  # Scheduler services
+  "srv/scheduler/AdjustPriority.srv"
   # Test services
   "srv/PingPong.srv"
   DEPENDENCIES

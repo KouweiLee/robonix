@@ -35,7 +35,7 @@ cd rust
 make help
 # Build SDK (ROS2 interface package)
 make build-sdk
-# Build CLI and Core
+# Build CLI, Core and Scheduler
 make build
 # Install binaries to local rust folder, normally ~/.cargo/bin
 make install

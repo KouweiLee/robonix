@@ -6,7 +6,7 @@
 # Tab completion: bash-completion is installed in Docker container
 # If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-cli build-core build-sdk debug release install install-cli install-core source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
+.PHONY: help build build-cli build-core build-scheduler build-sdk debug release install install-cli install-core install-scheduler source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -21,6 +21,7 @@ RUST_DIR := $(shell pwd)
 CLI_DIR := $(RUST_DIR)/robonix-cli
 CORE_DIR := $(RUST_DIR)/robonix-core
 SDK_DIR := $(RUST_DIR)/robonix-sdk
+SCHEDULER_DIR := $(RUST_DIR)/robonix-scheduler
 PROVIDER_DIR := $(RUST_DIR)/provider
 
 # Default target
@@ -33,6 +34,7 @@ help:
 	@echo "  make release        - Build in release mode"
 	@echo "  make build-cli      - Build robonix-cli only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-core     - Build robonix-core only (uses BUILD_MODE, default: debug)"
+	@echo "  make build-scheduler - Build robonix-scheduler only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-sdk      - Build robonix-sdk ROS2 interface package"
 	@echo "  Note: Set BUILD_MODE=release to build in release mode, or use 'make release'"
 	@echo ""
@@ -40,6 +42,7 @@ help:
 	@echo "  make install        - Install robonix-cli and robonix-core binaries via cargo install"
 	@echo "  make install-cli    - Install robonix-cli binaries (rbnx, rbnx-daemon) only"
 	@echo "  make install-core   - Install robonix-core binary only"
+	@echo "  make install-scheduler - Install robonix-scheduler binary only"
 	@echo "  Note: Binaries are installed to ~/.cargo/bin (make sure it's in your PATH)"
 	@echo ""
 	@echo "Environment commands:"
@@ -79,7 +82,7 @@ BUILD_MODE_DESC = debug
 endif
 
 # Build commands
-build: build-cli build-core
+build: build-cli build-core build-scheduler
 	@echo "✓ All components built successfully ($(BUILD_MODE_DESC) mode)"
 
 debug:
@@ -98,6 +101,11 @@ build-core:
 	cd $(CORE_DIR) && cargo build $(CARGO_BUILD_FLAGS)
 	@echo "✓ robonix-core built successfully ($(BUILD_MODE_DESC) mode)"
 
+build-scheduler:
+	@echo "Building robonix-scheduler ($(BUILD_MODE_DESC) mode)..."
+	cd $(SCHEDULER_DIR) && cargo build $(CARGO_BUILD_FLAGS)
+	@echo "✓ robonix-scheduler built successfully ($(BUILD_MODE_DESC) mode)"
+
 build-sdk:
 	@echo "Building robonix-sdk ROS2 interface package..."
 	@if [ ! -f $(ROS2_SETUP) ]; then \
@@ -112,7 +120,7 @@ build-sdk:
 buildsdk: build-sdk
 
 # Install commands
-install: install-cli install-core
+install: install-cli install-core install-scheduler
 	@echo "✓ All binaries installed successfully"
 	@echo ""
 	@echo "Binaries installed via cargo install to ~/.cargo/bin"
@@ -132,6 +140,11 @@ install-core:
 	@echo "Installing robonix-core binary via cargo install..."
 	cd $(CORE_DIR) && cargo install --path .
 	@echo "✓ Installed robonix-core"
+
+install-scheduler:
+	@echo "Installing robonix-scheduler binary via cargo install..."
+	cd $(SCHEDULER_DIR) && cargo install --path .
+	@echo "✓ Installed robonix-scheduler"
 
 # Environment commands
 source-sdk:
@@ -214,6 +227,8 @@ fmt:
 	cd $(CLI_DIR) && cargo fmt
 	@echo "Formatting robonix-core..."
 	cd $(CORE_DIR) && cargo fmt
+	@echo "Formatting robonix-scheduler..."
+	cd $(SCHEDULER_DIR) && cargo fmt
 	@echo "✓ Code formatted"
 
 # Check and test
@@ -223,6 +238,8 @@ check:
 	cd $(CLI_DIR) && cargo check
 	@echo "Checking robonix-core..."
 	cd $(CORE_DIR) && cargo check
+	@echo "Checking robonix-scheduler..."
+	cd $(SCHEDULER_DIR) && cargo check
 	@echo "✓ All checks passed"
 
 # Test framework paths
@@ -282,6 +299,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	cd $(CLI_DIR) && cargo clean
 	cd $(CORE_DIR) && cargo clean
+	cd $(SCHEDULER_DIR) && cargo clean
 	@echo "✓ Clean complete"
 
 clean-all: clean

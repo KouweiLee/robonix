@@ -9,7 +9,7 @@ use crate::task::exception::{ExceptionHandler, ExceptionType, RecoveryAction};
 use crate::task::queue::{RunningSkillInfo, TaskQueue};
 use crate::task::task::Task;
 use futures_util::stream::StreamExt;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use ros2_client::rustdds::{
     Duration as RustddsDuration, QosPolicyBuilder,
     policy::{self, Reliability},
@@ -19,17 +19,6 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-
-/// Clears running_skill_info when dropped (e.g. when execute_skill returns).
-struct ClearRunningSkillOnDrop(Arc<TaskQueue>);
-impl Drop for ClearRunningSkillOnDrop {
-    fn drop(&mut self) {
-        let q = self.0.clone();
-        tokio::spawn(async move {
-            q.set_running_skill_info(None).await;
-        });
-    }
-}
 
 /// RTDL Instruction - Represents a single instruction in RTDL
 #[derive(Debug, Clone)]
@@ -479,7 +468,41 @@ impl RtdlExecutor {
             skill_exec_id: skill_exec_id.clone(),
         };
         self.task_queue.set_running_skill_info(Some(info)).await;
-        let _skill_guard = ClearRunningSkillOnDrop(self.task_queue.clone());
+
+        // --- Scheduler Service Integration (Optional) ---
+        // Try to adjust priority via external scheduler service
+        let skill_name_for_sched = skill_name.to_string();
+        let node_clone = self.node.clone();
+        tokio::spawn(async move {
+            let _ = Self::call_scheduler_service(&node_clone, &skill_name_for_sched, true).await;
+        });
+
+        let _skill_guard = {
+            let q = self.task_queue.clone();
+            let node_clone = self.node.clone();
+            let name = skill_name.to_string();
+            
+            struct CleanupGuard {
+                q: Arc<TaskQueue>,
+                node: Arc<tokio::sync::Mutex<ros2_client::Node>>,
+                name: String,
+            }
+            impl Drop for CleanupGuard {
+                fn drop(&mut self) {
+                    let q = self.q.clone();
+                    let n = self.node.clone();
+                    let name = self.name.clone();
+                    tokio::spawn(async move {
+                        q.set_running_skill_info(None).await;
+                        // Restore priorities when skill finished
+                        let _ = RtdlExecutor::call_scheduler_service(&n, &name, false).await;
+                    });
+                }
+            }
+            CleanupGuard { q, node: node_clone, name }
+        };
+
+        // --- End Integration ---
 
         // Process first status if we received it during retry loop
         if let Some(first_status_str) = first_status {
@@ -786,6 +809,62 @@ impl RtdlExecutor {
                     .as_nanos() as u64;
 
                 Ok(ExecutionResult::Exception(recovery_action))
+            }
+        }
+    }
+
+    /// Call external scheduler service to adjust priorities
+    async fn call_scheduler_service(
+        node: &Arc<tokio::sync::Mutex<ros2_client::Node>>,
+        skill_name: &str,
+        high_priority: bool,
+    ) -> Result<(), String> {
+        use ros2_client::{AService, Name, ServiceMapping, ServiceTypeName};
+        use crate::ros_idl::service_types::{AdjustPriorityRequest, AdjustPriorityResponse};
+        use tokio::time::timeout;
+
+        let service_name = Name::parse("/rbnx/scheduler_policy").map_err(|e| e.to_string())?;
+        let service_type = ServiceTypeName::new("robonix_sdk", "AdjustPriority");
+
+        let mut node_guard = node.lock().await;
+        let service_qos = crate::server::create_qos();
+        
+        let client = node_guard.create_client::<AService<AdjustPriorityRequest, AdjustPriorityResponse>>(
+            ServiceMapping::Enhanced,
+            &service_name,
+            &service_type,
+            service_qos.clone(),
+            service_qos,
+        ).map_err(|e| format!("Failed to create scheduler client: {}", e))?;
+        drop(node_guard);
+
+        // Give ROS2 discovery a moment to find the service (cold start)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let request = AdjustPriorityRequest {
+            skill_name: skill_name.to_string(),
+            high_priority,
+        };
+        info!("Calling scheduler service for {}: high={}", skill_name, high_priority);
+        // Call with a longer timeout (2s) to allow for discovery
+        match timeout(Duration::from_secs(2), client.async_call_service(request)).await {
+            Ok(Ok(response)) => {
+                if response.ok {
+                    info!("Scheduler adjusted priority for {}: high={}", skill_name, high_priority);
+                    Ok(())
+                } else {
+                    warn!("Scheduler failed to adjust priority for {}", skill_name);
+                    Err("Scheduler returned not ok".to_string())
+                }
+            }
+            Ok(Err(e)) => {
+                // This is expected if scheduler is not running
+                warn!("Scheduler service call failed: {:?} (is robonix-scheduler running?)", e);
+                Err(format!("{:?}", e))
+            }
+            Err(_) => {
+                warn!("Scheduler service call timed out (is robonix-scheduler running?)");
+                Err("Timeout".to_string())
             }
         }
     }
