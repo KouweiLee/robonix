@@ -324,10 +324,8 @@ class WanderingSkill(Node):
             self._cancel_requested = False
             self.wandering_in_progress = True
 
-            self._publish_status(
-                skill_id, "running", {"message": "Starting wandering..."}
-            )
-
+            # Start heartbeat and wandering loop
+            self._start_heartbeat(skill_id)
             self._start_wandering_loop()
 
         except json.JSONDecodeError as e:
@@ -342,6 +340,27 @@ class WanderingSkill(Node):
             self.get_logger().error(f"Traceback:\n{traceback.format_exc()}")
             self._publish_status("unknown", "error", {
                                  "error": str(e)}, errno=4)
+
+    def _start_heartbeat(self, skill_id):
+        """Start a background heartbeat thread."""
+        import threading
+        thread = threading.Thread(
+            target=self._heartbeat_loop, args=(skill_id,), daemon=True
+        )
+        thread.start()
+
+    def _heartbeat_loop(self, skill_id):
+        """Periodically send running status as heartbeat to prevent executor timeout."""
+        self.get_logger().info(f"Heartbeat started for skill_id={skill_id}")
+        while self.wandering_in_progress and self.current_skill_id == skill_id:
+            try:
+                self._publish_status(
+                    skill_id, "running", {"message": "heartbeat"}, errno=0
+                )
+            except Exception as e:
+                self.get_logger().error(f"Error in heartbeat: {e}")
+            time.sleep(30.0)
+        self.get_logger().info(f"Heartbeat stopped for skill_id={skill_id}")
 
     def _start_wandering_loop(self):
         """Start the wandering loop."""

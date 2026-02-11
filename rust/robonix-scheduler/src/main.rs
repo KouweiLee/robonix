@@ -7,7 +7,7 @@ use ros2_client::{
     Context as RosContext, NodeOptions, ServiceMapping, ServiceTypeName, Name, NodeName,
     AService, rustdds::{QosPolicyBuilder, policy::Reliability, Duration as RustddsDuration},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,6 +16,108 @@ use futures::StreamExt;
 
 mod ros_idl;
 use ros_idl::{AdjustPriorityRequest, AdjustPriorityResponse};
+
+/// Resolve home directory. When running with sudo (home=/root), use SUDO_USER or cwd.
+fn resolve_home_dir() -> PathBuf {
+    let mut home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    if home_dir.to_str() == Some("/root") {
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            let path = PathBuf::from("/home").join(&sudo_user);
+            if path.exists() {
+                home_dir = path;
+            }
+        } else if let Ok(cwd) = std::env::current_dir() {
+            let parts: Vec<_> = cwd.components().collect();
+            if parts.len() >= 3 && parts[1].as_os_str() == "home" {
+                home_dir = PathBuf::from("/home").join(parts[2]);
+            }
+        }
+    }
+    home_dir
+}
+
+/// Scheduler configuration loaded from ~/.robonix/scheduler.yaml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchedulerConfig {
+    #[serde(default = "default_skill_dependencies")]
+    pub skill_dependencies: HashMap<String, Vec<String>>,
+    #[serde(default = "default_infrastructure_patterns")]
+    pub infrastructure_patterns: Vec<String>,
+}
+
+fn default_skill_dependencies() -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+    m.insert(
+        "skl::move_to_object".to_string(),
+        vec![
+            "prm::base.navigate".to_string(),
+            "prm::base.pose.cov".to_string(),
+            "srv::semantic_map".to_string(),
+            "prm::camera.rgb".to_string(),
+            "prm::camera.depth".to_string(),
+        ],
+    );
+    m.insert(
+        "skl::wandering".to_string(),
+        vec![
+            "prm::base.navigate".to_string(),
+            "prm::base.pose.cov".to_string(),
+        ],
+    );
+    m
+}
+
+fn default_infrastructure_patterns() -> Vec<String> {
+    vec![
+        "webots".to_string(),
+        "Webots".to_string(),
+        "webots_ros2".to_string(),
+        "robot_launch".to_string(),
+    ]
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            skill_dependencies: default_skill_dependencies(),
+            infrastructure_patterns: default_infrastructure_patterns(),
+        }
+    }
+}
+
+impl SchedulerConfig {
+    /// Config is in ~/.robonix/scheduler.yaml. When running with sudo, resolve real user's home.
+    fn config_path() -> Result<PathBuf> {
+        let home_dir = resolve_home_dir();
+        Ok(home_dir.join(".robonix").join("scheduler.yaml"))
+    }
+
+    fn load() -> Self {
+        let path = match Self::config_path() {
+            Ok(p) => p,
+            Err(_) => return Self::default(),
+        };
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match serde_yaml::from_str(&content) {
+                Ok(cfg) => {
+                    info!("Loaded scheduler config from {}", path.display());
+                    cfg
+                }
+                Err(e) => {
+                    warn!("Failed to parse scheduler config {}: {}. Using defaults.", path.display(), e);
+                    Self::default()
+                }
+            },
+            Err(e) => {
+                warn!("Failed to read scheduler config {}: {}. Using defaults.", path.display(), e);
+                Self::default()
+            }
+        }
+    }
+}
 
 /// Information about a running process (mirrors robonix-cli/src/process.rs)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,53 +155,56 @@ impl XpuScheduler {
 }
 
 pub struct PolicyGovernor {
-    // Mapping of skill name -> (component name, priority level)
+    /// Mapping of skill name -> (component name, priority level)
     dependencies: HashMap<String, Vec<(String, PriorityLevel)>>,
+    /// Process name patterns for infrastructure (Webots, webots_ros2_driver, etc.)
+    infrastructure_patterns: Vec<String>,
     process_cache: Arc<RwLock<HashMap<String, u32>>>,
     // Reference count now tracks the level
     priority_refs: Arc<RwLock<HashMap<String, (usize, PriorityLevel)>>>,
+    /// Number of skills currently requesting high priority. When > 0, infra is boosted.
+    infrastructure_refs: Arc<RwLock<usize>>,
+    /// PIDs of infrastructure processes we've boosted (for restore)
+    infrastructure_pids: Arc<RwLock<Vec<u32>>>,
     state_file: PathBuf,
 }
 
 impl PolicyGovernor {
     pub fn new() -> Self {
-        let mut dependencies = HashMap::new();
-        
-        // 关键改进：区分实时(RR)和高优先级(Nice)
-        // 只有涉及到物理运动控制的 prm::base.navigate 给予实时权限
-        dependencies.insert(
-            "skl::move_to_object".to_string(),
-            vec![
-                ("prm::base.navigate".to_string(), PriorityLevel::ThroughputCritical),
-                ("prm::base.pose.cov".to_string(), PriorityLevel::ThroughputCritical),
-                ("srv::semantic_map".to_string(), PriorityLevel::ThroughputCritical),
-                ("prm::camera.rgb".to_string(), PriorityLevel::ThroughputCritical),
-                ("prm::camera.depth".to_string(), PriorityLevel::ThroughputCritical),
-            ],
-        );
+        let config = SchedulerConfig::load();
 
-        dependencies.insert(
-            "skl::wandering".to_string(),
-            vec![
-                ("prm::base.navigate".to_string(), PriorityLevel::ThroughputCritical),
-                ("prm::base.pose.cov".to_string(), PriorityLevel::ThroughputCritical),
-            ],
-        );
+        // Build dependencies: skill -> [(component, ThroughputCritical), ...]
+        let dependencies: HashMap<String, Vec<(String, PriorityLevel)>> = config
+            .skill_dependencies
+            .into_iter()
+            .map(|(skill, components)| {
+                let deps = components
+                    .into_iter()
+                    .map(|c| (c, PriorityLevel::ThroughputCritical))
+                    .collect();
+                (skill, deps)
+            })
+            .collect();
 
-        let home_dir = dirs::home_dir().expect("Failed to get home directory");
+        let home_dir = resolve_home_dir();
         let state_file = home_dir.join(".robonix").join("processes.json");
+        info!("Using process state file: {}", state_file.display());
+        info!("Scheduler: {} skills, {} infra patterns", dependencies.len(), config.infrastructure_patterns.len());
 
         Self {
             dependencies,
+            infrastructure_patterns: config.infrastructure_patterns,
             process_cache: Arc::new(RwLock::new(HashMap::new())),
             priority_refs: Arc::new(RwLock::new(HashMap::new())),
+            infrastructure_refs: Arc::new(RwLock::new(0)),
+            infrastructure_pids: Arc::new(RwLock::new(Vec::new())),
             state_file,
         }
     }
 
     pub async fn update_process_cache(&self) {
         if !self.state_file.exists() {
-            debug!("Process state file not found at {}", self.state_file.display());
+            error!("Process state file not found at {}", self.state_file.display());
             return;
         }
 
@@ -110,7 +215,11 @@ impl PolicyGovernor {
                         let mut cache = self.process_cache.write().await;
                         cache.clear();
                         for p in processes {
-                            cache.insert(p.std_name.clone(), p.pid);
+                            if Self::is_process_running(p.pid) {
+                                cache.insert(p.std_name.clone(), p.pid);
+                            } else {
+                                debug!("Skipping stale process {} (PID {})", p.std_name, p.pid);
+                            }
                         }
                         debug!("Updated process cache with {} processes", cache.len());
                     }
@@ -118,6 +227,13 @@ impl PolicyGovernor {
                 }
             }
             Err(e) => warn!("Failed to read process state file {}: {}", self.state_file.display(), e),
+        }
+    }
+
+    fn is_process_running(pid: u32) -> bool {
+        unsafe {
+            // Signal 0 is used to check for existence
+            libc::kill(pid as libc::pid_t, 0) == 0
         }
     }
 
@@ -131,7 +247,7 @@ impl PolicyGovernor {
             format!("skl::{}", skill_name)
         };
         
-        // 技能本身默认属于 ThroughputCritical
+        // Skill itself defaults to ThroughputCritical
         targets.insert(full_skill_name.clone(), PriorityLevel::ThroughputCritical);
 
         if let Some(deps) = self.dependencies.get(&full_skill_name) {
@@ -165,39 +281,125 @@ impl PolicyGovernor {
                 }
             }
         }
+
+        // Infrastructure: ensure Webots/webots_ros2_driver etc. have priority >= any skill
+        drop(refs);
+        drop(cache);
+        let mut infra_refs = self.infrastructure_refs.write().await;
+        if high_priority {
+            *infra_refs += 1;
+            if *infra_refs == 1 {
+                self.boost_infrastructure().await;
+            }
+        } else if *infra_refs > 0 {
+            *infra_refs -= 1;
+            if *infra_refs == 0 {
+                self.restore_infrastructure().await;
+            }
+        }
+    }
+
+    /// Discover and boost simulation infrastructure processes (Webots, webots_ros2_driver).
+    async fn boost_infrastructure(&self) {
+        let pids = self.discover_infrastructure_pids();
+        if pids.is_empty() {
+            debug!("No infrastructure processes found");
+            return;
+        }
+        info!("Boosting {} infrastructure process(es): {:?}", pids.len(), pids);
+        for &pid in &pids {
+            Self::set_linux_priority(pid, "infra", Some(PriorityLevel::ThroughputCritical));
+        }
+        *self.infrastructure_pids.write().await = pids;
+    }
+
+    /// Restore infrastructure processes to normal priority.
+    async fn restore_infrastructure(&self) {
+        let pids: Vec<u32> = {
+            let mut guard = self.infrastructure_pids.write().await;
+            std::mem::take(&mut *guard)
+        };
+        if pids.is_empty() {
+            return;
+        }
+        info!("Restoring {} infrastructure process(es) to normal priority", pids.len());
+        for pid in pids {
+            Self::set_linux_priority(pid, "infra", None);
+        }
+    }
+
+    /// Find PIDs of processes matching infrastructure patterns (webots, webots_ros2, robot_launch).
+    fn discover_infrastructure_pids(&self) -> Vec<u32> {
+        let mut seen = HashSet::new();
+        for pattern in &self.infrastructure_patterns {
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg(pattern)
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Ok(pid) = line.trim().parse::<u32>() {
+                            if Self::is_process_running(pid) {
+                                seen.insert(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        seen.into_iter().collect()
     }
 
     fn set_linux_priority(pid: u32, name: &str, level: Option<PriorityLevel>) {
+        if !Self::is_process_running(pid) {
+            warn!("Skip priority adjustment for {} (PID {}): Process not found", name, pid);
+            return;
+        }
+
         unsafe {
+            // Get actual PGID (pid may be a child process resolved from the group)
+            let pgid = libc::getpgid(pid as libc::pid_t);
+            let pgid = if pgid > 0 { pgid as libc::id_t } else { pid as libc::id_t };
             match level {
                 Some(PriorityLevel::LatencyCritical) => {
-                    // 对于 LatencyCritical，尝试设置为实时调度策略 (SCHED_RR)
+                    // RT scheduling is still thread-based in Linux, no group setting
+                    // We set RT for the main PID, and high priority Nice for the group as fallback
                     let mut param: libc::sched_param = std::mem::zeroed();
                     param.sched_priority = 5; 
                     if libc::sched_setscheduler(pid as libc::pid_t, libc::SCHED_RR, &param) == 0 {
                         info!("Set {} (PID {}) to RT (SCHED_RR) priority 5", name, pid);
                     } else {
                         let err = std::io::Error::last_os_error();
-                        error!("RT failed for {} (PID {}): {}. Fallback to nice.", name, pid, err);
-                        let _ = libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, -15);
+                        if err.raw_os_error() == Some(libc::ESRCH) {
+                            warn!("RT failed for {} (PID {}): No such process", name, pid);
+                        } else {
+                            error!("RT failed for {} (PID {}): {}. Fallback to nice.", name, pid, err);
+                        }
+                        let _ = libc::setpriority(libc::PRIO_PGRP, pgid, -15);
                     }
                 }
                 Some(PriorityLevel::ThroughputCritical) => {
-                    // 对于 ThroughputCritical，仅调整 nice 值，不进入实时调度
-                    if libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, -10) != 0 {
+                    // Use PRIO_PGRP to adjust nice for the entire process group (including children)
+                    if libc::setpriority(libc::PRIO_PGRP, pgid, -10) != 0 {
                         let err = std::io::Error::last_os_error();
-                        error!("Failed nice for {} (PID {}): {}", name, pid, err);
+                        if err.raw_os_error() == Some(libc::ESRCH) {
+                            warn!("Failed nice for {} (PGID {}): No such process", name, pid);
+                        } else {
+                            error!("Failed nice for {} (PGID {}): {}", name, pid, err);
+                        }
                     } else {
-                        info!("Adjusted {} (PID {}) nice to -10", name, pid);
+                        info!("Adjusted {} (PGID {}) nice to -10", name, pid);
                     }
                 }
                 None => {
-                    // 还原优先级
+                    // Restore priority for the entire process group
                     let mut param: libc::sched_param = std::mem::zeroed();
                     param.sched_priority = 0;
                     let _ = libc::sched_setscheduler(pid as libc::pid_t, libc::SCHED_OTHER, &param);
-                    let _ = libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, 0);
-                    info!("Restored {} (PID {}) to Normal", name, pid);
+                    let _ = libc::setpriority(libc::PRIO_PGRP, pgid, 0);
+                    info!("Restored {} (PGID {}) to Normal", name, pid);
                 }
             }
         }
@@ -206,7 +408,7 @@ impl PolicyGovernor {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info,robonix_scheduler=debug,rustdds=error"));
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info,robonix_scheduler=debug,rustdds=off"));
     info!("robonix scheduler starting...");
 
     let governor = Arc::new(PolicyGovernor::new());

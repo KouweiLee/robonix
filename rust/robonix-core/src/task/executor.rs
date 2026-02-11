@@ -458,9 +458,12 @@ impl RtdlExecutor {
 
         // Wait for skill completion (monitor status_topic)
         // Standard status format: {"skill_id": "...", "state": "running"|"finished"|"error"|"cancelled", "result": {...}, "errno": 0, ...}
-        let timeout_duration = Duration::from_secs(300); // 5 minutes timeout
-        let start_time = std::time::Instant::now();
-
+        
+        // --- Improved Monitoring Logic ---
+        // Instead of a hard 5-minute timeout, we use an inactivity timeout.
+        // As long as the skill sends a status message (heartbeat), it can run indefinitely.
+        let inactivity_timeout = Duration::from_secs(120); // 2 minutes of silence allowed
+        
         // Register running skill info so cancel_task can publish terminate to start_topic
         let info = RunningSkillInfo {
             task_id: task.task_id.clone(),
@@ -533,18 +536,23 @@ impl RtdlExecutor {
                             return Ok(());
                         }
                         "error" => {
-                            // Extract error message
-                            let error_msg = status_json
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .or_else(|| status_json.get("message").and_then(|v| v.as_str()))
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| {
-                                    format!("Skill execution failed with errno={}", errno)
-                                });
+                            if errno == 1 {
+                                info!("Skill {} already in progress (errno=1). Attempting to take over monitoring.", skill_name);
+                                // Don't return error, proceed to monitoring loop
+                            } else {
+                                // Extract error message
+                                let error_msg = status_json
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| status_json.get("message").and_then(|v| v.as_str()))
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| {
+                                        format!("Skill execution failed with errno={}", errno)
+                                    });
 
-                            error!("Skill {} execution failed: {}", skill_name, error_msg);
-                            return Err((ExceptionType::SkillFailed, Some(error_msg)));
+                                error!("Skill {} execution failed: {}", skill_name, error_msg);
+                                return Err((ExceptionType::SkillFailed, Some(error_msg)));
+                            }
                         }
                         _ => {
                             // Still running, continue to main loop
@@ -560,22 +568,10 @@ impl RtdlExecutor {
         }
 
         loop {
-            let remaining_timeout = timeout_duration.saturating_sub(start_time.elapsed());
-            if remaining_timeout.is_zero() {
-                error!(
-                    "Skill {} execution timeout after {:?}",
-                    skill_name, timeout_duration
-                );
-                let error_msg = format!(
-                    "Skill {} execution timeout after {:?}",
-                    skill_name, timeout_duration
-                );
-                return Err((ExceptionType::SkillFailed, Some(error_msg)));
-            }
-
-            match timeout(remaining_timeout, status_rx.recv()).await {
+            match timeout(inactivity_timeout, status_rx.recv()).await {
                 Ok(Some(status_str)) => {
                     debug!("Received status message: {}", status_str);
+                    // Receiving any message resets the inactivity timeout for the next iteration
 
                     // Parse status JSON
                     let status_json: serde_json::Value = match serde_json::from_str(&status_str) {
@@ -648,6 +644,10 @@ impl RtdlExecutor {
                             return Ok(());
                         }
                         "error" => {
+                            if errno == 1 {
+                                info!("Skill {} confirmed already in progress, continuing to monitor...", skill_name);
+                                continue;
+                            }
                             error!(
                                 "Skill {} execution failed: skill_exec_id={}, errno={}, error={}",
                                 skill_name, skill_exec_id, errno, error_msg
@@ -677,12 +677,27 @@ impl RtdlExecutor {
                     return Err((ExceptionType::SkillFailed, Some(error_msg)));
                 }
                 Err(_) => {
-                    // Timeout
+                    // Inactivity Timeout
                     let error_msg = format!(
-                        "Skill {} execution timeout after 5 minutes: skill_exec_id={}",
-                        skill_name, skill_exec_id
+                        "Skill {} execution inactivity timeout (no status for {:?}): skill_exec_id={}",
+                        skill_name, inactivity_timeout, skill_exec_id
                     );
                     error!("{}", error_msg);
+
+                    // --- Critical Fix: Send terminate message to skill provider on timeout ---
+                    info!("Sending terminate message to skill {} due to timeout: {}", skill_name, skill_exec_id);
+                    let terminate_json = serde_json::json!({
+                        "terminate": true,
+                        "skill_id": skill_exec_id
+                    });
+                    if let Ok(terminate_data) = serde_json::to_string(&terminate_json) {
+                        let terminate_msg = crate::ros_idl::skill::StdString {
+                            data: terminate_data,
+                        };
+                        let _ = start_publisher.publish(terminate_msg);
+                    }
+                    // --- End Fix ---
+
                     return Err((ExceptionType::Timeout, Some(error_msg)));
                 }
             }

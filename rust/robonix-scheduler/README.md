@@ -19,6 +19,7 @@ The scheduler monitors "skill" activation requests via a ROS 2 service and adjus
 
 - **ROS 2**: A working ROS 2 installation (configured via `ros2-client`).
 - **Process State File**: The scheduler expects a JSON file at `~/.robonix/processes.json` containing information about running Robonix processes (typically managed by the Robonix CLI).
+- **Scheduler Config**: `~/.robonix/scheduler.yaml` for skill dependencies and infrastructure patterns. Installed by `make install` (copy from robonix-scheduler/scheduler.yaml if not present). Edit there to customize.
 - **Permissions**: Root privileges or `CAP_SYS_NICE` capabilities are required to adjust the scheduling policy of other processes.
 
 ## Usage

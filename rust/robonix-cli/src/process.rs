@@ -215,22 +215,23 @@ impl ProcessManager {
             let processes = self.processes.lock().unwrap();
             if let Some(existing) = processes.get(&key) {
                 log::warn!("Process for {} already running, skipping", key);
-                // Return existing process info
                 #[cfg(unix)]
                 let (pgid, pids) = {
-                    if let Ok(pgid) = Self::get_process_group_id(existing.pid) {
-                        let pids = Self::get_processes_in_group(pgid).ok();
-                        (Some(pgid), pids)
-                    } else {
-                        (None, None)
-                    }
+                    let pgid = Self::get_process_group_id(existing.pid).ok();
+                    let pids = pgid.and_then(|g| Self::get_processes_in_group(g).ok());
+                    (pgid, pids)
                 };
-                #[cfg(not(unix))]
-                let (pgid, pids) = (None, None);
+                #[cfg(unix)]
                 return Ok(ProcessStartResult {
                     pid: existing.pid,
                     pgid,
                     pids,
+                });
+                #[cfg(not(unix))]
+                return Ok(ProcessStartResult {
+                    pid: existing.pid,
+                    pgid: None,
+                    pids: None,
                 });
             }
         }
@@ -422,23 +423,19 @@ impl ProcessManager {
         }
 
         // Get PID and detach the child (let it run independently)
+        // Scripts use exec() so shell is replaced by python/ros2; same PID.
         let pid = child
             .id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get process ID"))?;
 
         // Detach the child - it will continue running even if we drop the handle
-        // We'll manage it by PID
         drop(child);
 
-        // Get process group information for return value
         #[cfg(unix)]
         let (pgid, pids) = {
-            if let Ok(pgid) = Self::get_process_group_id(pid) {
-                let pids = Self::get_processes_in_group(pgid).ok();
-                (Some(pgid), pids)
-            } else {
-                (None, None)
-            }
+            let pgid = Self::get_process_group_id(pid).ok();
+            let pids = pgid.and_then(|g| Self::get_processes_in_group(g).ok());
+            (pgid, pids)
         };
         #[cfg(not(unix))]
         let (pgid, pids) = (None, None);
@@ -461,7 +458,11 @@ impl ProcessManager {
         // Save state to persistent storage
         self.save_state()?;
 
-        Ok(ProcessStartResult { pid, pgid, pids })
+        Ok(ProcessStartResult {
+            pid,
+            pgid,
+            pids,
+        })
     }
 
     /// Get all running processes

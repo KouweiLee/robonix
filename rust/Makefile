@@ -6,7 +6,7 @@
 # Tab completion: bash-completion is installed in Docker container
 # If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-cli build-core build-scheduler build-sdk debug release install install-cli install-core install-scheduler source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
+.PHONY: help build build-install build-cli build-core build-scheduler build-sdk debug release install install-cli install-core install-scheduler source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -30,6 +30,7 @@ help:
 	@echo ""
 	@echo "Build commands:"
 	@echo "  make build          - Build robonix-cli and robonix-core (default: debug mode)"
+	@echo "  make build-install  - Build and install all binaries (build + install)"
 	@echo "  make debug          - Build in debug mode (default)"
 	@echo "  make release        - Build in release mode"
 	@echo "  make build-cli      - Build robonix-cli only (uses BUILD_MODE, default: debug)"
@@ -63,6 +64,7 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make build"
+	@echo "  make build-install   # build + install in one step"
 	@echo "  make install"
 	@echo "  rbnx config --show"
 	@echo "  rbnx package list"
@@ -84,6 +86,9 @@ endif
 # Build commands
 build: build-cli build-core build-scheduler
 	@echo "✓ All components built successfully ($(BUILD_MODE_DESC) mode)"
+
+build-install: build install
+	@echo "✓ Build and install complete"
 
 debug:
 	@$(MAKE) BUILD_MODE=debug build
@@ -144,6 +149,9 @@ install-core:
 install-scheduler:
 	@echo "Installing robonix-scheduler binary via cargo install..."
 	cd $(SCHEDULER_DIR) && cargo install --path .
+	@mkdir -p ~/.robonix
+	cp $(SCHEDULER_DIR)/scheduler.yaml ~/.robonix/scheduler.yaml
+	@echo "✓ Installed scheduler.yaml to ~/.robonix/"
 	@echo "✓ Installed robonix-scheduler"
 
 # Environment commands
