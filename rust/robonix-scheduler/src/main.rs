@@ -125,6 +125,31 @@ fn default_skill_dependencies() -> HashMap<String, Vec<String>> {
             "prm::base.pose.cov".to_string(),
         ],
     );
+    // Benchmark skills (scheduler_benchmark package)
+    m.insert(
+        "skl::bench_nav".to_string(),
+        vec![
+            "prm::base.navigate".to_string(),
+            "prm::base.pose.cov".to_string(),
+            "srv::bench_slam".to_string(),
+        ],
+    );
+    m.insert(
+        "skl::bench_grasp".to_string(),
+        vec![
+            "prm::camera.rgb".to_string(),
+            "prm::camera.depth".to_string(),
+            "srv::bench_perception".to_string(),
+        ],
+    );
+    m.insert(
+        "skl::bench_inspect".to_string(),
+        vec![
+            "prm::camera.rgb".to_string(),
+            "prm::camera.depth".to_string(),
+            "srv::bench_perception".to_string(),
+        ],
+    );
     m
 }
 

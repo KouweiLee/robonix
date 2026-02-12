@@ -1,0 +1,67 @@
+# Benchmark configuration
+# Adjust parameters based on your hardware and desired precision
+
+output_dir: benchmark_results
+settle_time: 3.0          # Seconds to let background workers stabilize
+skill_init_time: 2.0      # Seconds to wait for skill process to initialize
+skill_timeout: 600.0      # Max seconds to wait for a skill to complete
+num_runs: 1               # Number of runs per skill per condition
+
+# Background contention workers
+# These run continuously during the benchmark, creating resource contention.
+# std_name must match entries in scheduler.yaml for the scheduler to manage them.
+background_workers:
+  perception:
+    rate_hz: 10.0
+    std_name: srv::bench_perception
+  slam:
+    rate_hz: 5.0
+    std_name: srv::bench_slam
+  speech:
+    rate_hz: 3.0
+    std_name: srv::bench_speech
+  motion_plan:
+    rate_hz: 8.0
+    std_name: srv::bench_motion_plan
+
+# Benchmark skills
+# Each skill runs sequentially. Background workers create contention.
+skills:
+  - name: "skl::bench_nav"
+    module: scheduler_benchmark.skills.nav2_skill
+    topic_prefix: /robot1/skill/bench_nav
+    iterations: 200
+    warmup: 20
+    params:
+      grid_size: 300      # Occupancy grid size for path planning
+      scan_grid: 200      # Grid size for scan matching
+    dependencies:
+      - prm::base.navigate
+      - prm::base.pose.cov
+      - srv::bench_slam
+
+  - name: "skl::bench_grasp"
+    module: scheduler_benchmark.skills.vla_skill
+    topic_prefix: /robot1/skill/bench_grasp
+    iterations: 150
+    warmup: 15
+    params:
+      image_size: 224     # Input image size
+      layers: 12          # Transformer layers
+      hidden: 768         # Hidden dimension
+      seq_len: 256        # Sequence length
+    dependencies:
+      - prm::camera.rgb
+      - prm::camera.depth
+      - srv::bench_perception
+
+  - name: "skl::bench_inspect"
+    module: scheduler_benchmark.skills.inspect_skill
+    topic_prefix: /robot1/skill/bench_inspect
+    iterations: 150
+    warmup: 15
+    params: {}
+    dependencies:
+      - prm::camera.rgb
+      - prm::camera.depth
+      - srv::bench_perception

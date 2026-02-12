@@ -28,3 +28,4 @@ target
 stress_test
 .robonix
 rust/debug
+rust/provider/scheduler_benchmark/benchmark_results

@@ -12,6 +12,19 @@ skill_dependencies:
   skl::wandering:
     - prm::base.navigate
     - prm::base.pose.cov
+  # Benchmark skills (scheduler_benchmark package)
+  skl::bench_nav:
+    - prm::base.navigate
+    - prm::base.pose.cov
+    - srv::bench_slam
+  skl::bench_grasp:
+    - prm::camera.rgb
+    - prm::camera.depth
+    - srv::bench_perception
+  skl::bench_inspect:
+    - prm::camera.rgb
+    - prm::camera.depth
+    - srv::bench_perception
 
 # Process name patterns for simulation infrastructure (Webots, webots_ros2_driver).
 infrastructure_patterns:

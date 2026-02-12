@@ -6,7 +6,7 @@
 # Tab completion: bash-completion is installed in Docker container
 # If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-install build-cli build-core build-scheduler build-sdk build-xsched debug release install install-cli install-core install-scheduler install-xsched source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework init-xsched
+.PHONY: help build build-install build-cli build-core build-scheduler build-sdk build-xsched debug release install install-cli install-core install-scheduler install-xsched source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework init-xsched bench-scheduler bench-scheduler-baseline bench-scheduler-full bench-report
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -65,6 +65,12 @@ help:
 	@echo "  make test-rust      - Run Rust CLI stress tests"
 	@echo "  make test-python    - Run Python stress tests"
 	@echo "  make benchmark      - Run benchmark suite with different concurrency levels"
+	@echo ""
+	@echo "Scheduler benchmark commands:"
+	@echo "  make bench-scheduler       - Run full A/B comparison (baseline vs scheduler)"
+	@echo "  make bench-scheduler-baseline - Run baseline only (no scheduler)"
+	@echo "  make bench-scheduler-full  - Run with custom iterations (BENCH_ITERS=300)"
+	@echo "  make bench-report DIR=<dir> - Regenerate report from existing results"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make build"
@@ -351,3 +357,31 @@ clean-all: clean
 	@if [ -d "$(SDK_DIR)/install" ]; then rm -rf $(SDK_DIR)/install; fi
 	@if [ -d "$(SDK_DIR)/log" ]; then rm -rf $(SDK_DIR)/log; fi
 	@echo "✓ All artifacts cleaned"
+
+# ---------------------------------------------------------------------------
+# Scheduler Benchmark
+# ---------------------------------------------------------------------------
+BENCH_DIR := $(PROVIDER_DIR)/scheduler_benchmark
+BENCH_ITERS ?= 0
+
+bench-scheduler:
+	@echo "Running scheduler benchmark (A/B comparison)..."
+	cd $(BENCH_DIR) && python3 run_benchmark.py --config config/benchmark.yaml
+	@echo "✓ Benchmark complete. Results in $(BENCH_DIR)/benchmark_results/"
+
+bench-scheduler-baseline:
+	@echo "Running scheduler benchmark (baseline only)..."
+	cd $(BENCH_DIR) && python3 run_benchmark.py --config config/benchmark.yaml --baseline-only
+	@echo "✓ Baseline benchmark complete."
+
+bench-scheduler-full:
+	@echo "Running scheduler benchmark (full comparison, $(if $(filter-out 0,$(BENCH_ITERS)),iters=$(BENCH_ITERS),default iters))..."
+	cd $(BENCH_DIR) && python3 run_benchmark.py --config config/benchmark.yaml --runs 3
+	@echo "✓ Full benchmark complete."
+
+bench-report:
+	@if [ -z "$(DIR)" ]; then \
+		echo "Usage: make bench-report DIR=benchmark_results/<timestamp>"; \
+		exit 1; \
+	fi
+	cd $(BENCH_DIR) && python3 -m scheduler_benchmark.report "$(DIR)"

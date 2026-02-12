@@ -1,0 +1,68 @@
+# Robonix Package Manifest - Scheduler Benchmark
+# EAIOS Architecture v2.0
+
+package:
+  name: scheduler_benchmark
+  version: 0.1.0
+  description: >
+    CPU/GPU scheduling benchmark for embodied AI systems.
+    Compares robonix-scheduler performance against default Linux CFS scheduling
+    using synthetic workloads that simulate real robot computation patterns.
+  maintainer: Robonix Team
+  maintainer_email: ""
+  license: MulanPSL-2.0
+
+skills:
+  - name: skl::bench_nav
+    type: basic
+    start_topic: /robot1/skill/bench_nav/start
+    status_topic: /robot1/skill/bench_nav/status
+    entry: python3 -m scheduler_benchmark.skills.nav2_skill
+    start_args: >
+      {"iterations": "int: number of benchmark iterations (default 200)",
+       "warmup": "int: warmup iterations to discard (default 20)",
+       "grid_size": "int: occupancy grid size (default 300)",
+       "output_file": "str: path to save results JSON"}
+    status: >
+      {"skill_id": "str", "state": "str: running|finished|error",
+       "result": "dict: benchmark statistics", "errno": "int", "error": "str"}
+    metadata: '{"resource_profile": "CPU-heavy", "workload": "path_planning+scan_matching"}'
+    version: 0.1.0
+    start_script: rbnx/start_bench_nav.sh
+    stop_script: rbnx/stop_bench_nav.sh
+
+  - name: skl::bench_grasp
+    type: basic
+    start_topic: /robot1/skill/bench_grasp/start
+    status_topic: /robot1/skill/bench_grasp/status
+    entry: python3 -m scheduler_benchmark.skills.vla_skill
+    start_args: >
+      {"iterations": "int: number of iterations (default 150)",
+       "warmup": "int: warmup iterations (default 15)",
+       "layers": "int: transformer layers (default 12)",
+       "hidden": "int: hidden dimension (default 768)",
+       "output_file": "str: path to save results JSON"}
+    status: >
+      {"skill_id": "str", "state": "str: running|finished|error",
+       "result": "dict: benchmark statistics", "errno": "int", "error": "str"}
+    metadata: '{"resource_profile": "GPU-heavy", "workload": "VLA_transformer_inference"}'
+    version: 0.1.0
+    start_script: rbnx/start_bench_grasp.sh
+    stop_script: rbnx/stop_bench_grasp.sh
+
+  - name: skl::bench_inspect
+    type: basic
+    start_topic: /robot1/skill/bench_inspect/start
+    status_topic: /robot1/skill/bench_inspect/status
+    entry: python3 -m scheduler_benchmark.skills.inspect_skill
+    start_args: >
+      {"iterations": "int: number of iterations (default 150)",
+       "warmup": "int: warmup iterations (default 15)",
+       "output_file": "str: path to save results JSON"}
+    status: >
+      {"skill_id": "str", "state": "str: running|finished|error",
+       "result": "dict: benchmark statistics", "errno": "int", "error": "str"}
+    metadata: '{"resource_profile": "CPU+GPU mixed", "workload": "perception_pipeline"}'
+    version: 0.1.0
+    start_script: rbnx/start_bench_inspect.sh
+    stop_script: rbnx/stop_bench_inspect.sh
