@@ -36,6 +36,63 @@ fn resolve_home_dir() -> PathBuf {
     home_dir
 }
 
+/// xsched configuration for GPU scheduling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct XschedConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_xcli_path")]
+    pub xcli_path: String,
+    #[serde(default = "default_xsched_addr")]
+    pub server_addr: String,
+    #[serde(default = "default_xsched_port")]
+    pub server_port: u16,
+    #[serde(default = "default_high_priority")]
+    pub high_priority: i32,
+    #[serde(default)]
+    pub normal_priority: i32,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_xcli_path() -> String {
+    "~/.robonix/bin/xcli".to_string()
+}
+
+/// Expand ~ to HOME in path. Uses resolve_home_dir() for consistency when running as root.
+fn expand_tilde(path: &str) -> PathBuf {
+    if path.starts_with("~/") {
+        resolve_home_dir().join(path.trim_start_matches("~/"))
+    } else if path == "~" {
+        resolve_home_dir()
+    } else {
+        PathBuf::from(path)
+    }
+}
+fn default_xsched_addr() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_xsched_port() -> u16 {
+    50000
+}
+fn default_high_priority() -> i32 {
+    10
+}
+
+impl Default for XschedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            xcli_path: default_xcli_path(),
+            server_addr: "127.0.0.1".to_string(),
+            server_port: 50000,
+            high_priority: 10,
+            normal_priority: 0,
+        }
+    }
+}
+
 /// Scheduler configuration loaded from ~/.robonix/scheduler.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SchedulerConfig {
@@ -43,6 +100,10 @@ struct SchedulerConfig {
     pub skill_dependencies: HashMap<String, Vec<String>>,
     #[serde(default = "default_infrastructure_patterns")]
     pub infrastructure_patterns: Vec<String>,
+    #[serde(default)]
+    pub xpu_components: Vec<String>,
+    #[serde(default)]
+    pub xsched: XschedConfig,
 }
 
 fn default_skill_dependencies() -> HashMap<String, Vec<String>> {
@@ -81,6 +142,8 @@ impl Default for SchedulerConfig {
         Self {
             skill_dependencies: default_skill_dependencies(),
             infrastructure_patterns: default_infrastructure_patterns(),
+            xpu_components: Vec::new(),
+            xsched: XschedConfig::default(),
         }
     }
 }
@@ -140,17 +203,34 @@ enum PriorityLevel {
     ThroughputCritical,
 }
 
-pub struct XpuScheduler {
-    // Reserved for xsched integration
-}
+fn send_xcli_hint(xsched: &XschedConfig, pid: u32, name: &str, priority: i32) {
+    let xcli_path = expand_tilde(&xsched.xcli_path);
+    let output = std::process::Command::new(&xcli_path)
+        .args([
+            "-a",
+            &xsched.server_addr,
+            "-p",
+            &xsched.server_port.to_string(),
+            "hint",
+            "--pid",
+            &pid.to_string(),
+            "-p",
+            &priority.to_string(),
+        ])
+        .output();
 
-impl XpuScheduler {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub async fn adjust_xpu_scheduling(&self, _skill_name: &str, _high_priority: bool) {
-        // Placeholder for xsched integration
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                info!("xsched hint: {} (PID {}) -> priority {}", name, pid, priority);
+            } else {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                debug!("xsched hint failed for {} (PID {}): {}", name, pid, stderr);
+            }
+        }
+        Err(e) => {
+            debug!("xsched xcli exec failed for {}: {}", name, e);
+        }
     }
 }
 
@@ -167,6 +247,10 @@ pub struct PolicyGovernor {
     /// PIDs of infrastructure processes we've boosted (for restore)
     infrastructure_pids: Arc<RwLock<Vec<u32>>>,
     state_file: PathBuf,
+    /// Components that use GPU (std_name), for xsched scheduling
+    xpu_components: HashSet<String>,
+    xsched: XschedConfig,
+    xpu_priority_refs: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 impl PolicyGovernor {
@@ -188,8 +272,14 @@ impl PolicyGovernor {
 
         let home_dir = resolve_home_dir();
         let state_file = home_dir.join(".robonix").join("processes.json");
+        let xpu_components: HashSet<String> = config.xpu_components.into_iter().collect();
         info!("Using process state file: {}", state_file.display());
-        info!("Scheduler: {} skills, {} infra patterns", dependencies.len(), config.infrastructure_patterns.len());
+        info!(
+            "Scheduler: {} skills, {} infra patterns, {} xpu components",
+            dependencies.len(),
+            config.infrastructure_patterns.len(),
+            xpu_components.len()
+        );
 
         Self {
             dependencies,
@@ -199,6 +289,9 @@ impl PolicyGovernor {
             infrastructure_refs: Arc::new(RwLock::new(0)),
             infrastructure_pids: Arc::new(RwLock::new(Vec::new())),
             state_file,
+            xpu_components,
+            xsched: config.xsched,
+            xpu_priority_refs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -258,11 +351,15 @@ impl PolicyGovernor {
 
         let cache = self.process_cache.read().await;
         let mut refs = self.priority_refs.write().await;
+        let mut xpu_refs = self.xpu_priority_refs.write().await;
+        let xpu_enabled = self.xsched.enabled
+            && !self.xpu_components.is_empty()
+            && !self.xsched.xcli_path.is_empty();
 
         for (target, level) in targets {
             info!("Adjusting priority for {}: level={:?}", target, level);
             let (count, _) = refs.entry(target.clone()).or_insert((0, level));
-            
+
             if high_priority {
                 *count += 1;
                 if *count == 1 {
@@ -280,10 +377,43 @@ impl PolicyGovernor {
                     }
                 }
             }
+
+            // GPU (xsched): apply to targets in xpu_components
+            if xpu_enabled && self.xpu_components.contains(&target) {
+                let xpu_count = xpu_refs.entry(target.clone()).or_insert(0);
+                if high_priority {
+                    *xpu_count += 1;
+                    if *xpu_count == 1 {
+                        if let Some(&pid) = cache.get(&target) {
+                            send_xcli_hint(
+                                &self.xsched,
+                                pid,
+                                &target,
+                                self.xsched.high_priority,
+                            );
+                        }
+                    }
+                } else {
+                    if *xpu_count > 0 {
+                        *xpu_count -= 1;
+                        if *xpu_count == 0 {
+                            if let Some(&pid) = cache.get(&target) {
+                                send_xcli_hint(
+                                    &self.xsched,
+                                    pid,
+                                    &target,
+                                    self.xsched.normal_priority,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Infrastructure: ensure Webots/webots_ros2_driver etc. have priority >= any skill
         drop(refs);
+        drop(xpu_refs);
         drop(cache);
         let mut infra_refs = self.infrastructure_refs.write().await;
         if high_priority {
@@ -412,8 +542,7 @@ async fn main() -> Result<()> {
     info!("robonix scheduler starting...");
 
     let governor = Arc::new(PolicyGovernor::new());
-    let xpu_scheduler = Arc::new(XpuScheduler::new());
-    
+
     // Source ROS2 environment
     let ros_context = RosContext::new().context("Failed to create ROS2 context")?;
     let mut node = ros_context
@@ -451,13 +580,10 @@ async fn main() -> Result<()> {
                 info!("Received adjustment request: skill={}, high={}", req.skill_name, req.high_priority);
                 
                 let gov = governor.clone();
-                let xpu = xpu_scheduler.clone();
                 let skill_name = req.skill_name.clone();
                 let high_priority = req.high_priority;
-                
-                // Process adjustment
+
                 gov.adjust_priorities(&skill_name, high_priority).await;
-                xpu.adjust_xpu_scheduling(&skill_name, high_priority).await;
                 
                 let response = AdjustPriorityResponse { ok: true };
                 if let Err(e) = server.async_send_response(req_id, response).await {

@@ -19,3 +19,16 @@ infrastructure_patterns:
   - Webots
   - webots_ros2
   - robot_launch
+
+# Components that use GPU (for xsched scheduling). Only these will receive GPU priority hints.
+# Add std_name of capabilities/services that run inference on GPU (e.g. srv::semantic_map).
+xpu_components: []
+
+# xsched integration (optional). Set xcli_path to enable GPU scheduling via xsched.
+xsched:
+  enabled: true
+  xcli_path: "~/.robonix/bin/xcli"  # Expand ~ to HOME. Use "xcli" to search PATH.
+  server_addr: "127.0.0.1"
+  server_port: 50000
+  high_priority: 10
+  normal_priority: 0

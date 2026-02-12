@@ -19,3 +19,7 @@
 [submodule "common_interfaces"]
 	path = rust/lib/common_interfaces
 	url = https://github.com/enkerewpo/common_interfaces
+[submodule "rust/lib/xsched"]
+	path = rust/lib/xsched
+	url = https://github.com/KouweiLee/xsched.git
+	branch = rbnx

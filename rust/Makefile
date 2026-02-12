@@ -6,7 +6,7 @@
 # Tab completion: bash-completion is installed in Docker container
 # If tab completion doesn't work, ensure bash-completion is installed and enabled
 
-.PHONY: help build build-install build-cli build-core build-scheduler build-sdk debug release install install-cli install-core install-scheduler source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework
+.PHONY: help build build-install build-cli build-core build-scheduler build-sdk build-xsched debug release install install-cli install-core install-scheduler install-xsched source-sdk env clean test test-all test-rust test-python test-cpp test-ros2 benchmark check setup-dev fmt test-framework init-xsched
 .DEFAULT_GOAL := help
 
 # Default ROS2 distribution (can be overridden)
@@ -23,6 +23,7 @@ CORE_DIR := $(RUST_DIR)/robonix-core
 SDK_DIR := $(RUST_DIR)/robonix-sdk
 SCHEDULER_DIR := $(RUST_DIR)/robonix-scheduler
 PROVIDER_DIR := $(RUST_DIR)/provider
+XSCHED_DIR := $(RUST_DIR)/lib/xsched
 
 # Default target
 help:
@@ -37,6 +38,8 @@ help:
 	@echo "  make build-core     - Build robonix-core only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-scheduler - Build robonix-scheduler only (uses BUILD_MODE, default: debug)"
 	@echo "  make build-sdk      - Build robonix-sdk ROS2 interface package"
+	@echo "  make build-xsched   - Build xsched (GPU scheduler, requires CUDA). Run 'make init-xsched' first."
+	@echo "  make init-xsched    - Initialize xsched submodules (required before build-xsched)"
 	@echo "  Note: Set BUILD_MODE=release to build in release mode, or use 'make release'"
 	@echo ""
 	@echo "Install commands:"
@@ -44,6 +47,7 @@ help:
 	@echo "  make install-cli    - Install robonix-cli binaries (rbnx, rbnx-daemon) only"
 	@echo "  make install-core   - Install robonix-core binary only"
 	@echo "  make install-scheduler - Install robonix-scheduler binary only"
+	@echo "  make install-xsched   - Install xsched (xcli, xserver) to ~/.robonix/bin/"
 	@echo "  Note: Binaries are installed to ~/.cargo/bin (make sure it's in your PATH)"
 	@echo ""
 	@echo "Environment commands:"
@@ -111,6 +115,22 @@ build-scheduler:
 	cd $(SCHEDULER_DIR) && cargo build $(CARGO_BUILD_FLAGS)
 	@echo "✓ robonix-scheduler built successfully ($(BUILD_MODE_DESC) mode)"
 
+init-xsched:
+	@echo "Initializing xsched submodules..."
+	@cd $(XSCHED_DIR) && for sub in CLI11 cpp-httplib cpp-ipc cuxtra jsoncpp tabulate; do \
+		git submodule update --init "3rdparty/$$sub" 2>/dev/null || true; \
+	done
+	@echo "✓ xsched submodules initialized"
+
+build-xsched:
+	@echo "Building xsched (CUDA platform)..."
+	@if [ ! -d "$(XSCHED_DIR)" ]; then \
+		echo "Error: xsched not found. Run 'git submodule update --init rust/lib/xsched'"; \
+		exit 1; \
+	fi
+	cd $(XSCHED_DIR) && make cuda
+	@echo "✓ xsched built successfully (output: $(XSCHED_DIR)/output)"
+
 build-sdk:
 	@echo "Building robonix-sdk ROS2 interface package..."
 	@if [ ! -f $(ROS2_SETUP) ]; then \
@@ -152,7 +172,22 @@ install-scheduler:
 	@mkdir -p ~/.robonix
 	cp $(SCHEDULER_DIR)/scheduler.yaml ~/.robonix/scheduler.yaml
 	@echo "✓ Installed scheduler.yaml to ~/.robonix/"
+	@$(MAKE) install-xsched
 	@echo "✓ Installed robonix-scheduler"
+
+install-xsched:
+	@echo "Installing xsched (xcli, xserver) to ~/.robonix/bin/..."
+	@mkdir -p ~/.robonix/bin ~/.robonix/lib
+	@cp $(SCHEDULER_DIR)/xsched_env.sh ~/.robonix/
+	@if [ -f "$(XSCHED_DIR)/output/bin/xcli" ]; then \
+		cp $(XSCHED_DIR)/output/bin/xcli $(XSCHED_DIR)/output/bin/xserver ~/.robonix/bin/; \
+		cp -a $(XSCHED_DIR)/output/lib/*.so* ~/.robonix/lib/ 2>/dev/null || true; \
+		echo "✓ Installed xcli and xserver to ~/.robonix/bin/"; \
+		echo "  Start xserver: ~/.robonix/bin/xserver HPF 50000"; \
+		echo "  Source xsched env for GPU processes: . ~/.robonix/xsched_env.sh"; \
+	else \
+		echo "Note: xsched not built. Run 'make init-xsched && make build-xsched' to enable GPU scheduling"; \
+	fi
 
 # Environment commands
 source-sdk:

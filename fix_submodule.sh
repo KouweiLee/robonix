@@ -27,7 +27,14 @@ fi
 
 echo "=== sync and update submodules ==="
 git submodule sync --recursive
-git submodule update --init --recursive --force
+git submodule update --init --recursive --force || true
+
+echo "=== init xsched submodules (skip ftxui if missing) ==="
+if [ -d rust/lib/xsched ]; then
+  (cd rust/lib/xsched && for sub in CLI11 cpp-httplib cpp-ipc cuxtra jsoncpp tabulate; do
+    git submodule update --init "3rdparty/$sub" 2>/dev/null || true
+  done)
+fi
 
 echo "=== final submodule status ==="
 git submodule status --recursive || true
