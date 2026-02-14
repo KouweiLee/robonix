@@ -10,7 +10,8 @@ setup(
     ],
     extras_require={
         "gpu": ["torch"],
-        "ros2": ["rclpy", "std_msgs"],
+        # rclpy, std_msgs, and robonix_sdk are provided by the sourced
+        # ROS 2 workspace and cannot be pip-installed.
     },
     entry_points={
         "console_scripts": [

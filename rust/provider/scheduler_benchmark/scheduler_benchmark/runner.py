@@ -4,7 +4,7 @@ Benchmark Runner - Orchestrates the full scheduling benchmark.
 
 Responsibilities:
   1. Start background contention processes (perception, SLAM, speech, motion plan)
-  2. Register their PIDs in ~/.robonix/processes.json (for the scheduler)
+  2. Register their PIDs with the scheduler via ROS2 service (in-memory, no file I/O)
   3. Start skill processes (nav2, VLA grasp, visual inspection)
   4. For each skill: call scheduler to boost/restore priorities
   5. Send start command via ROS2 topic, wait for completion
@@ -22,15 +22,20 @@ import argparse
 import json
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+
+try:
+    import rclpy
+    from rclpy.qos import QoSProfile, ReliabilityPolicy
+    _RCLPY_AVAILABLE = True
+except ImportError:
+    _RCLPY_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -157,14 +162,44 @@ class BenchmarkConfig:
 class ProcessManager:
     """Manages background worker and skill processes."""
 
-    def __init__(self, processes_json: str):
-        self.processes_json = processes_json
+    def __init__(self, scheduler_registrar: "SchedulerRegistrar", xsched_enabled: bool = False):
+        self._registrar = scheduler_registrar
+        self._xsched_enabled = xsched_enabled
         self._bg_procs: Dict[str, subprocess.Popen] = {}
+        # std_name -> PID mapping for all processes we've started
+        self._registered: Dict[str, int] = {}
         self._skill_proc: Optional[subprocess.Popen] = None
-        self._process_entries: List[dict] = []
+        self._skill_std_name: Optional[str] = None
+
+    def _get_subprocess_env(self) -> Dict[str, str]:
+        """Get environment variables for subprocesses, including xsched if enabled."""
+        env = os.environ.copy()
+        if not self._xsched_enabled:
+            return env
+
+        home = os.path.expanduser("~")
+        robonix_dir = os.path.join(home, ".robonix")
+        lib_dir = os.path.join(robonix_dir, "lib")
+
+        if os.path.isdir(lib_dir):
+            # Prepend to LD_LIBRARY_PATH (matches xsched_env.sh)
+            lp = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{lib_dir}:{lp}" if lp else lib_dir
+
+            # Set xsched variables from xsched_env.sh
+            env["XSCHED_SCHEDULER"] = "GLB"
+            env["XSCHED_AUTO_XQUEUE"] = "ON"
+            env["XSCHED_AUTO_XQUEUE_LEVEL"] = "1"
+            env["XSCHED_AUTO_XQUEUE_PRIORITY"] = "0"
+            env["XSCHED_AUTO_XQUEUE_THRESHOLD"] = "16"
+            env["XSCHED_AUTO_XQUEUE_BATCH_SIZE"] = "8"
+            
+            logger.debug("Applied xsched environment variables to subprocess")
+        return env
 
     def start_background_workers(self, workers: Dict[str, dict]):
         """Start all background contention workers as subprocesses."""
+        env = self._get_subprocess_env()
         for name, cfg in workers.items():
             rate = cfg.get("rate_hz", 5.0)
             std_name = cfg.get("std_name", f"srv::bench_{name}")
@@ -178,42 +213,34 @@ class ProcessManager:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
             )
             self._bg_procs[name] = proc
-            self._process_entries.append({
-                "package_name": "scheduler_benchmark",
-                "std_name": std_name,
-                "package_type": "cap",
-                "pid": proc.pid,
-                "log_file": "",
-                "hostname": os.uname().nodename,
-            })
-            logger.info("  -> PID %d for %s", proc.pid, std_name)
+            self._registered[std_name] = proc.pid
+            logger.info("  -> PID %d for %s (new session)", proc.pid, std_name)
 
-        self._write_processes_json()
+        # Register all PIDs with scheduler (with retry)
+        self._registrar.register_all(self._registered)
 
     def start_skill(self, module: str, skill_name: str) -> subprocess.Popen:
         """Start a skill process."""
+        env = self._get_subprocess_env()
         cmd = [sys.executable, "-m", module]
         logger.info("Starting skill process: %s (%s)", skill_name, module)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
         )
         self._skill_proc = proc
+        self._skill_std_name = skill_name
 
-        # Add to processes.json
-        self._process_entries.append({
-            "package_name": "scheduler_benchmark",
-            "std_name": skill_name,
-            "package_type": "skl",
-            "pid": proc.pid,
-            "log_file": "",
-            "hostname": os.uname().nodename,
-        })
-        self._write_processes_json()
-        logger.info("  -> PID %d for %s", proc.pid, skill_name)
+        # Register skill PID with scheduler
+        self._registrar.register_one(skill_name, proc.pid)
+        logger.info("  -> PID %d for %s (new session)", proc.pid, skill_name)
         return proc
 
     def stop_skill(self):
@@ -227,14 +254,11 @@ class ProcessManager:
                 self._skill_proc.kill()
                 self._skill_proc.wait()
 
-        # Remove skill entry from processes list
-        if self._skill_proc:
-            self._process_entries = [
-                e for e in self._process_entries
-                if e.get("pid") != self._skill_proc.pid
-            ]
-            self._write_processes_json()
+        # Unregister skill from scheduler
+        if self._skill_std_name:
+            self._registrar.unregister_one(self._skill_std_name)
         self._skill_proc = None
+        self._skill_std_name = None
 
     def stop_all_background(self):
         """Stop all background workers."""
@@ -242,57 +266,222 @@ class ProcessManager:
             if proc.poll() is None:
                 logger.info("Stopping background worker: %s (PID %d)", name, proc.pid)
                 proc.terminate()
-        # Wait for all to finish
         for name, proc in self._bg_procs.items():
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+
+        # Unregister all from scheduler
+        self._registrar.unregister_all(self._registered)
         self._bg_procs.clear()
-        self._process_entries = []
-        self._write_processes_json()
-
-    def _write_processes_json(self):
-        """Write current process entries to ~/.robonix/processes.json."""
-        # Merge with existing entries (from other Robonix components)
-        existing = []
-        if os.path.exists(self.processes_json):
-            try:
-                with open(self.processes_json) as f:
-                    existing = json.load(f)
-                # Filter out stale benchmark entries
-                our_pids = {e["pid"] for e in self._process_entries}
-                existing = [
-                    e for e in existing
-                    if e.get("package_name") != "scheduler_benchmark"
-                    or e.get("pid") in our_pids
-                ]
-            except (json.JSONDecodeError, KeyError):
-                existing = []
-
-        # Merge: existing non-benchmark + our entries
-        merged = [
-            e for e in existing
-            if e.get("package_name") != "scheduler_benchmark"
-        ] + self._process_entries
-
-        os.makedirs(os.path.dirname(self.processes_json), exist_ok=True)
-        with open(self.processes_json, "w") as f:
-            json.dump(merged, f, indent=2)
+        self._registered.clear()
 
 
 # ---------------------------------------------------------------------------
-# Scheduler Client (via ROS2 CLI or direct ROS2 call)
+# ROS2 Communication Bridge (persistent node, zero subprocess overhead)
 # ---------------------------------------------------------------------------
+
+# Maximum retries for service calls that must succeed
+_MAX_RETRIES = 5
+_RETRY_DELAY = 1.0  # seconds between retries
+
+
+class ROS2Bridge:
+    """
+    Persistent rclpy node for efficient ROS2 IPC.
+
+    Replaces subprocess-based ``ros2 service call`` / ``ros2 topic pub`` with
+    in-process rclpy service clients and publishers.  Eliminates per-call
+    overhead of fork + exec + Python startup + DDS discovery (~1-3 s each)
+    down to < 5 ms per call.
+    """
+
+    def __init__(self):
+        if not _RCLPY_AVAILABLE:
+            raise RuntimeError(
+                "rclpy is not available. Source your ROS 2 workspace first:\n"
+                "  source /opt/ros/$ROS_DISTRO/setup.bash\n"
+                "  source <ws>/install/setup.bash"
+            )
+
+        # Lazy import: types only available after workspace is built & sourced
+        from robonix_sdk.srv import AdjustPriority, RegisterProcess
+        from std_msgs.msg import String as StringMsg
+
+        self._AdjustPriority = AdjustPriority
+        self._RegisterProcess = RegisterProcess
+        self._StringMsg = StringMsg
+
+        if not rclpy.ok():
+            rclpy.init()
+            self._owns_rclpy = True
+        else:
+            self._owns_rclpy = False
+
+        self._node = rclpy.create_node('benchmark_runner')
+
+        self._register_cli = self._node.create_client(
+            RegisterProcess, '/rbnx/scheduler_register')
+        self._policy_cli = self._node.create_client(
+            AdjustPriority, '/rbnx/scheduler_policy')
+
+        self._publishers: Dict[str, Any] = {}
+        logger.info("ROS2Bridge: persistent node 'benchmark_runner' created")
+
+    # -- service helpers ---------------------------------------------------
+
+    def wait_for_services(self, timeout_sec: float = 10.0) -> bool:
+        """Block until both scheduler services are discoverable."""
+        logger.info("Waiting for scheduler services (timeout=%.1fs)...", timeout_sec)
+        if not self._register_cli.wait_for_service(timeout_sec=timeout_sec):
+            logger.warning("scheduler_register service not available")
+            return False
+        if not self._policy_cli.wait_for_service(timeout_sec=timeout_sec):
+            logger.warning("scheduler_policy service not available")
+            return False
+        logger.info("Scheduler services discovered")
+        return True
+
+    def call_register(self, std_name: str, pid: int, register: bool,
+                      timeout_sec: float = 10.0) -> Optional[bool]:
+        """Call RegisterProcess service.  Returns ``ok`` field or *None* on failure."""
+        req = self._RegisterProcess.Request()
+        req.std_name = std_name
+        req.pid = pid
+        req.do_register = register
+        resp = self._call_service(self._register_cli, req, timeout_sec)
+        return resp.ok if resp is not None else None
+
+    def call_policy(self, skill_name: str, high_priority: bool,
+                    timeout_sec: float = 10.0) -> Optional[bool]:
+        """Call AdjustPriority service.  Returns ``ok`` field or *None* on failure."""
+        req = self._AdjustPriority.Request()
+        req.skill_name = skill_name
+        req.high_priority = high_priority
+        resp = self._call_service(self._policy_cli, req, timeout_sec)
+        return resp.ok if resp is not None else None
+
+    def _call_service(self, client, request, timeout_sec: float):
+        """Internal: synchronous service call with timeout."""
+        assert self._node is not None, "ROS2Bridge already destroyed"
+        if not client.service_is_ready():
+            if not client.wait_for_service(timeout_sec=min(timeout_sec, 5.0)):
+                logger.warning("Service not ready: %s", client.srv_name)
+                return None
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(
+            self._node, future, timeout_sec=timeout_sec)
+        if future.done():
+            return future.result()
+        future.cancel()
+        logger.warning("Service call timed out: %s", client.srv_name)
+        return None
+
+    # -- topic helpers -----------------------------------------------------
+
+    def publish_string(self, topic: str, data: str,
+                       wait_for_sub_sec: float = 5.0) -> bool:
+        """Publish a ``std_msgs/String`` message, waiting for subscriber discovery."""
+        assert self._node is not None, "ROS2Bridge already destroyed"
+        if topic not in self._publishers:
+            qos = QoSProfile(
+                depth=10,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+            self._publishers[topic] = self._node.create_publisher(
+                self._StringMsg, topic, qos)
+            logger.debug("Created publisher for %s", topic)
+
+        pub = self._publishers[topic]
+
+        # Wait for at least one subscriber (DDS discovery)
+        deadline = time.time() + wait_for_sub_sec
+        while pub.get_subscription_count() == 0 and time.time() < deadline:
+            rclpy.spin_once(self._node, timeout_sec=0.1)
+            time.sleep(0.05)
+
+        if pub.get_subscription_count() == 0:
+            logger.warning("No subscribers on %s after %.1fs", topic, wait_for_sub_sec)
+            return False
+
+        msg = self._StringMsg()
+        msg.data = data
+        pub.publish(msg)
+        return True
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def destroy(self):
+        """Destroy node; optionally shut down rclpy if we own it."""
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+        if self._owns_rclpy and rclpy.ok():
+            rclpy.shutdown()
+        logger.info("ROS2Bridge destroyed")
+
+
+class SchedulerRegistrar:
+    """
+    Registers / unregisters process PIDs with the scheduler via the
+    scheduler_register ROS2 service.  Uses the persistent ROS2Bridge for
+    zero-overhead IPC (no subprocess fork per call).
+    """
+
+    def __init__(self, bridge: ROS2Bridge, enabled: bool = True):
+        self._bridge = bridge
+        self.enabled = enabled
+
+    def register_one(self, std_name: str, pid: int):
+        """Register a single process. Retries until success."""
+        if not self.enabled:
+            return
+        for attempt in range(1, _MAX_RETRIES + 1):
+            result = self._bridge.call_register(std_name, pid, True)
+            if result is not None:
+                return
+            if attempt < _MAX_RETRIES:
+                logger.warning(
+                    "Register %s (PID %d): attempt %d/%d failed, retrying in %.0fs...",
+                    std_name, pid, attempt, _MAX_RETRIES, _RETRY_DELAY,
+                )
+                time.sleep(_RETRY_DELAY)
+        raise RuntimeError(
+            f"Register {std_name} (PID {pid}): all {_MAX_RETRIES} attempts failed. "
+            f"Is robonix-scheduler running?"
+        )
+
+    def unregister_one(self, std_name: str):
+        """Unregister a single process. Best-effort (no retry)."""
+        if not self.enabled:
+            return
+        self._bridge.call_register(std_name, 0, False)
+
+    def register_all(self, entries: Dict[str, int]):
+        """Register multiple processes. Each retries until success."""
+        if not self.enabled:
+            return
+        for std_name, pid in entries.items():
+            self.register_one(std_name, pid)
+
+    def unregister_all(self, entries: Dict[str, int]):
+        """Unregister multiple processes. Best-effort."""
+        if not self.enabled:
+            return
+        for std_name in entries:
+            self.unregister_one(std_name)
+
 
 class SchedulerClient:
     """
-    Calls the robonix-scheduler's scheduler_policy service.
-    Uses ros2 service call via CLI for simplicity and independence.
+    Calls the robonix-scheduler's scheduler_policy service via
+    the persistent ROS2Bridge (in-process, no subprocess overhead).
     """
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, bridge: ROS2Bridge, enabled: bool = True):
+        self._bridge = bridge
         self.enabled = enabled
         if not enabled:
             logger.info("Scheduler client DISABLED (baseline mode)")
@@ -301,58 +490,36 @@ class SchedulerClient:
         """Request high priority for a skill's dependencies."""
         if not self.enabled:
             return True
-        return self._call_service(skill_name, True)
+        return self._call(skill_name, True)
 
     def de_escalate(self, skill_name: str) -> bool:
         """Restore normal priority for a skill's dependencies."""
         if not self.enabled:
             return True
-        return self._call_service(skill_name, False)
+        return self._call(skill_name, False)
 
-    def _call_service(self, skill_name: str, high_priority: bool) -> bool:
-        """Call scheduler_policy service via ros2 CLI."""
+    def _call(self, skill_name: str, high_priority: bool) -> bool:
         action = "escalate" if high_priority else "de-escalate"
         logger.info("Scheduler %s: %s", action, skill_name)
-        try:
-            cmd = [
-                "ros2", "service", "call",
-                "/rbnx/scheduler_policy",
-                "robonix_sdk/srv/AdjustPriority",
-                json.dumps({
-                    "skill_name": skill_name,
-                    "high_priority": high_priority,
-                }),
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                logger.info("Scheduler %s OK for %s", action, skill_name)
-                return True
-            else:
-                logger.warning(
-                    "Scheduler %s failed for %s: %s",
-                    action, skill_name, result.stderr.strip(),
-                )
-                return False
-        except subprocess.TimeoutExpired:
-            logger.warning("Scheduler call timed out for %s", skill_name)
-            return False
-        except FileNotFoundError:
-            logger.warning("ros2 CLI not found, scheduler integration disabled")
-            self.enabled = False
-            return False
+        result = self._bridge.call_policy(skill_name, high_priority)
+        if result is not None:
+            logger.info("Scheduler %s OK for %s", action, skill_name)
+            return True
+        logger.warning("Scheduler %s failed for %s", action, skill_name)
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Skill Trigger (via ROS2 topic publish)
+# Skill Trigger (via ROS2 topic publish through persistent bridge)
 # ---------------------------------------------------------------------------
 
 class SkillTrigger:
-    """Publishes start/terminate commands to skill topics via ros2 CLI."""
+    """Publishes start/terminate commands to skill topics via ROS2Bridge."""
 
-    @staticmethod
-    def start_skill(topic: str, skill_id: str, params: dict,
+    def __init__(self, bridge: ROS2Bridge):
+        self._bridge = bridge
+
+    def start_skill(self, topic: str, skill_id: str, params: dict,
                     output_file: str, scheduler_enabled: bool) -> bool:
         """Publish a start command to the skill's start topic."""
         msg_data = json.dumps({
@@ -363,34 +530,12 @@ class SkillTrigger:
                 "scheduler_enabled": scheduler_enabled,
             },
         })
-        try:
-            cmd = [
-                "ros2", "topic", "pub", "--once",
-                f"{topic}/start",
-                "std_msgs/msg/String",
-                json.dumps({"data": msg_data}),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            logger.error("Failed to publish start: %s", e)
-            return False
+        return self._bridge.publish_string(f"{topic}/start", msg_data)
 
-    @staticmethod
-    def terminate_skill(topic: str, skill_id: str) -> bool:
+    def terminate_skill(self, topic: str, skill_id: str) -> bool:
         """Publish a terminate command to the skill's start topic."""
         msg_data = json.dumps({"terminate": True, "skill_id": skill_id})
-        try:
-            cmd = [
-                "ros2", "topic", "pub", "--once",
-                f"{topic}/start",
-                "std_msgs/msg/String",
-                json.dumps({"data": msg_data}),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return False
+        return self._bridge.publish_string(f"{topic}/start", msg_data)
 
 
 # ---------------------------------------------------------------------------
@@ -401,13 +546,15 @@ class BenchmarkRunner:
     """
     Main benchmark orchestrator.
     Runs all skills with and without the scheduler, collecting metrics.
+
+    Owns a persistent ``ROS2Bridge`` that is reused across all benchmark
+    phases (baseline / scheduler), eliminating repeated node creation and
+    DDS discovery overhead.
     """
 
     def __init__(self, config: BenchmarkConfig):
         self.config = config
-        home = os.path.expanduser("~")
-        self.processes_json = os.path.join(home, ".robonix", "processes.json")
-        self.proc_mgr = ProcessManager(self.processes_json)
+        self._bridge = ROS2Bridge()
 
     def run(self, scheduler_enabled: bool) -> List[dict]:
         """
@@ -424,13 +571,24 @@ class BenchmarkRunner:
         logger.info("BENCHMARK RUN: %s", condition.upper())
         logger.info("=" * 70)
 
-        scheduler = SchedulerClient(enabled=scheduler_enabled)
+        # Wait for scheduler services once at the start of a scheduler run
+        if scheduler_enabled:
+            if not self._bridge.wait_for_services(timeout_sec=10.0):
+                raise RuntimeError(
+                    "Scheduler services not available. "
+                    "Is robonix-scheduler running?"
+                )
+
+        registrar = SchedulerRegistrar(self._bridge, enabled=scheduler_enabled)
+        scheduler = SchedulerClient(self._bridge, enabled=scheduler_enabled)
+        trigger = SkillTrigger(self._bridge)
+        proc_mgr = ProcessManager(registrar, xsched_enabled=scheduler_enabled)
         results = []
 
         # Start background workers
         logger.info("Starting %d background workers...",
                      len(self.config.background_workers))
-        self.proc_mgr.start_background_workers(self.config.background_workers)
+        proc_mgr.start_background_workers(self.config.background_workers)
 
         # Allow workers to settle
         logger.info("Settling for %.1fs...", self.config.settle_time)
@@ -440,19 +598,22 @@ class BenchmarkRunner:
             for skill_cfg in self.config.skills:
                 for run_idx in range(self.config.num_runs):
                     result = self._run_single_skill(
-                        skill_cfg, scheduler, condition, run_idx,
+                        skill_cfg, scheduler, trigger,
+                        proc_mgr, condition, run_idx,
                     )
                     if result:
                         results.append(result)
         finally:
             # Cleanup
             logger.info("Stopping all background workers...")
-            self.proc_mgr.stop_all_background()
+            proc_mgr.stop_all_background()
 
         return results
 
     def _run_single_skill(self, skill_cfg: SkillConfig,
                           scheduler: SchedulerClient,
+                          trigger: SkillTrigger,
+                          proc_mgr: ProcessManager,
                           condition: str, run_idx: int) -> Optional[dict]:
         """Run a single skill benchmark."""
         skill_name = skill_cfg.name
@@ -472,7 +633,7 @@ class BenchmarkRunner:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         # Start skill process
-        skill_proc = self.proc_mgr.start_skill(skill_cfg.module, skill_name)
+        skill_proc = proc_mgr.start_skill(skill_cfg.module, skill_name)
         time.sleep(self.config.skill_init_time)
 
         # Escalate scheduler priorities
@@ -481,7 +642,7 @@ class BenchmarkRunner:
         # Send start command
         logger.info("Triggering skill %s (iterations=%d, warmup=%d)",
                      skill_name, skill_cfg.iterations, skill_cfg.warmup)
-        SkillTrigger.start_skill(
+        trigger.start_skill(
             skill_cfg.topic_prefix,
             skill_id,
             {**skill_cfg.params, "iterations": skill_cfg.iterations,
@@ -512,14 +673,14 @@ class BenchmarkRunner:
             time.sleep(2.0)
         else:
             logger.warning("Skill %s timed out!", skill_name)
-            SkillTrigger.terminate_skill(skill_cfg.topic_prefix, skill_id)
+            trigger.terminate_skill(skill_cfg.topic_prefix, skill_id)
             time.sleep(2.0)
 
         # De-escalate scheduler
         scheduler.de_escalate(skill_name)
 
         # Stop skill process
-        self.proc_mgr.stop_skill()
+        proc_mgr.stop_skill()
 
         # Read results
         if os.path.exists(output_file):
@@ -560,6 +721,10 @@ class BenchmarkRunner:
         scheduler = self.run(scheduler_enabled=True)
 
         return baseline, scheduler
+
+    def cleanup(self):
+        """Destroy the ROS2Bridge and release resources."""
+        self._bridge.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -631,25 +796,27 @@ def main():
         }, f, indent=2)
 
     runner = BenchmarkRunner(config)
+    try:
+        if args.baseline_only:
+            results = runner.run(scheduler_enabled=False)
+            _save_results(config.output_dir, "baseline", results)
+        elif args.scheduler_only:
+            results = runner.run(scheduler_enabled=True)
+            _save_results(config.output_dir, "scheduler", results)
+        else:
+            baseline, scheduler = runner.run_comparison()
+            _save_results(config.output_dir, "baseline", baseline)
+            _save_results(config.output_dir, "scheduler", scheduler)
 
-    if args.baseline_only:
-        results = runner.run(scheduler_enabled=False)
-        _save_results(config.output_dir, "baseline", results)
-    elif args.scheduler_only:
-        results = runner.run(scheduler_enabled=True)
-        _save_results(config.output_dir, "scheduler", results)
-    else:
-        baseline, scheduler = runner.run_comparison()
-        _save_results(config.output_dir, "baseline", baseline)
-        _save_results(config.output_dir, "scheduler", scheduler)
+            # Generate comparison report
+            from scheduler_benchmark.report import generate_comparison_report
+            generate_comparison_report(
+                baseline, scheduler, config.output_dir,
+            )
 
-        # Generate comparison report
-        from scheduler_benchmark.report import generate_comparison_report
-        generate_comparison_report(
-            baseline, scheduler, config.output_dir,
-        )
-
-    logger.info("Benchmark complete. Results in: %s", config.output_dir)
+        logger.info("Benchmark complete. Results in: %s", config.output_dir)
+    finally:
+        runner.cleanup()
 
 
 def _save_results(output_dir: str, condition: str, results: List[dict]):

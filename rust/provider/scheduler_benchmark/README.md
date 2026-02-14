@@ -34,9 +34,10 @@ This benchmark quantifies the scheduling gap by running realistic synthetic work
          ▼                                ▼
 ┌──────────────────────────────────────────────────────────────┐
 │              robonix-scheduler (optional)                     │
-│  • Reads PIDs from ~/.robonix/processes.json                 │
+│  • PIDs registered in-memory via scheduler_register service  │
 │  • Boosts active skill's dependencies (nice / SCHED_RR)      │
 │  • Sends xsched GPU priority hints for CUDA workloads        │
+│  • Zero file I/O during benchmark (no processes.json reads)  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,26 +76,60 @@ GPU workloads use **PyTorch CUDA** when available; automatic **numpy CPU fallbac
 
 ## Quick Start
 
+Follow these steps to run a full A/B comparison benchmark (CFS vs. Robonix).
+
+### 1. Build and Install Components
+
+From the `rust/` directory (root of the workspace):
+
 ```bash
-# From the rust/ directory:
+# Build and install core, cli, and scheduler
+make build-install
 
-# 1. Full A/B comparison (baseline vs scheduler)
+# Build and install SDK (ROS2 interface)
+make build-sdk
+
+# Build and install xsched (GPU scheduler - requires CUDA)
+make init-xsched && make build-xsched && make install-xsched
+```
+
+### 2. Prepare Configuration
+
+Copy the benchmark-specific scheduler configuration to your home directory:
+
+```bash
+cp provider/scheduler_benchmark/config/scheduler.yaml ~/.robonix/scheduler.yaml
+```
+
+### 3. Start Background Services
+
+You will need three terminals (or run in background):
+
+**Terminal 1: Start robonix-scheduler (requires sudo)**
+```bash
+sudo ~/.cargo/bin/robonix-scheduler
+```
+
+**Terminal 2: Start xsched server (for GPU scheduling)**
+```bash
+~/.robonix/bin/xserver HPF 50000
+```
+
+**Terminal 3: Run the Benchmark**
+```bash
+# Source ROS2 and Robonix SDK
+source /opt/ros/humble/setup.bash  # or your distro
+eval $(make source-sdk)
+
+# Run the full A/B comparison
 make bench-scheduler
-
-# 2. Baseline only (no scheduler needed)
-make bench-scheduler-baseline
-
-# 3. Or run directly:
-cd provider/scheduler_benchmark
-python3 run_benchmark.py
-
-# 4. Regenerate report from existing results
-make bench-report DIR=benchmark_results/<timestamp>
 ```
 
 ## Usage
 
-### Running the benchmark directly
+### Running the benchmark script directly
+
+If you want more control, you can run the Python script directly from the `provider/scheduler_benchmark` directory:
 
 ```bash
 cd provider/scheduler_benchmark
@@ -108,54 +143,17 @@ python3 run_benchmark.py --baseline-only
 # Scheduler only
 python3 run_benchmark.py --scheduler-only
 
-# Custom config
-python3 run_benchmark.py --config config/benchmark.yaml --runs 3
-
-# Custom output directory
-python3 run_benchmark.py --output-dir /tmp/my_results
+# Custom config and runs
+python3 run_benchmark.py --config config/benchmark.yaml --runs 3 --output-dir ./my_results
 ```
 
-### Running with the scheduler
+### Advanced GPU Scheduling Options
 
-1. Build and install the scheduler:
-   ```bash
-   make build-scheduler
-   make install-scheduler   # also installs scheduler.yaml with benchmark entries
-   ```
+The benchmark automatically detects if `xsched` is running. To ensure it's used:
 
-2. Copy the benchmark scheduler config (if not already done):
-   ```bash
-   cp provider/scheduler_benchmark/config/scheduler.yaml ~/.robonix/scheduler.yaml
-   ```
-
-3. Start the scheduler (requires root):
-   ```bash
-   sudo robonix-scheduler
-   ```
-
-4. In another terminal, run the benchmark:
-   ```bash
-   cd provider/scheduler_benchmark
-   python3 run_benchmark.py
-   ```
-
-### GPU scheduling (optional)
-
-To also benchmark xsched GPU scheduling:
-
-```bash
-# Build and install xsched
-make init-xsched && make build-xsched && make install-xsched
-
-# Start xserver
-~/.robonix/bin/xserver HPF 50000 &
-
-# Source xsched environment for GPU processes
-source ~/.robonix/xsched_env.sh
-
-# Run benchmark
-python3 run_benchmark.py
-```
+1.  Verify `xserver` is running on port 50000.
+2.  Ensure `xsched: enabled: true` is set in `~/.robonix/scheduler.yaml`.
+3.  Always `source ~/.robonix/xsched_env.sh` before running the benchmark to intercept CUDA calls.
 
 ## Configuration
 

@@ -1,46 +1,62 @@
-# Robonix Scheduler Configuration
-# Installed to ~/.robonix/scheduler.yaml by make install. Edit there to customize.
+# Scheduler configuration for the scheduling benchmark
+# Install this to ~/.robonix/scheduler.yaml before running the benchmark
+# (or merge with existing scheduler.yaml)
 
-# Skill -> list of components (primitives/services) to boost when skill runs.
+# Skill dependency mapping:
+# When a skill is active, the scheduler boosts all listed components.
 skill_dependencies:
+  # Navigation benchmark: boost path planner + localization + SLAM
+  skl::bench_nav:
+    - prm::base.navigate
+    - prm::base.pose.cov
+    - srv::bench_slam
+    - skl::bench_nav
+
+  # VLA grasping benchmark: boost cameras + perception pipeline
+  skl::bench_grasp:
+    - prm::camera.rgb
+    - prm::camera.depth
+    - srv::bench_perception
+    - skl::bench_grasp
+
+  # Visual inspection: boost cameras + perception
+  skl::bench_inspect:
+    - prm::camera.rgb
+    - prm::camera.depth
+    - srv::bench_perception
+    - skl::bench_inspect
+
+  # Also keep existing skill configs for real robot operation
   skl::move_to_object:
     - prm::base.navigate
     - prm::base.pose.cov
     - srv::semantic_map
     - prm::camera.rgb
     - prm::camera.depth
+
   skl::wandering:
     - prm::base.navigate
     - prm::base.pose.cov
-  # Benchmark skills (scheduler_benchmark package)
-  skl::bench_nav:
-    - prm::base.navigate
-    - prm::base.pose.cov
-    - srv::bench_slam
-  skl::bench_grasp:
-    - prm::camera.rgb
-    - prm::camera.depth
-    - srv::bench_perception
-  skl::bench_inspect:
-    - prm::camera.rgb
-    - prm::camera.depth
-    - srv::bench_perception
 
-# Process name patterns for simulation infrastructure (Webots, webots_ros2_driver).
+# Infrastructure processes to boost when any skill is active
 infrastructure_patterns:
   - webots
   - Webots
   - webots_ros2
   - robot_launch
+  - xserver
 
-# Components that use GPU (for xsched scheduling). Only these will receive GPU priority hints.
-# Add std_name of capabilities/services that run inference on GPU (e.g. srv::semantic_map).
-xpu_components: []
+# GPU-using components (for xsched integration)
+# These components' GPU workloads will be scheduled by xsched
+xpu_components:
+  - srv::bench_perception
+  - skl::bench_grasp
+  - skl::bench_inspect
 
-# xsched integration (optional). Set xcli_path to enable GPU scheduling via xsched.
+# xsched GPU scheduler configuration
 xsched:
   enabled: true
-  xcli_path: "~/.robonix/bin/xcli"  # Expand ~ to HOME. Use "xcli" to search PATH.
+  xcli_path: "~/.robonix/bin/xcli"
   server_addr: "127.0.0.1"
   server_port: 50000
   high_priority: 10

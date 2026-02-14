@@ -83,10 +83,24 @@ sudo ./target/debug/robonix-scheduler
 
 ## Service API
 
-The scheduler exposes a ROS 2 service:
+The scheduler exposes two ROS 2 services:
+
+### scheduler_policy — Priority Adjustment
 
 - **Service Name**: `scheduler_policy`
 - **Service Type**: `robonix_sdk/AdjustPriority`
 - **Request**:
   - `skill_name` (string): The name of the skill (e.g., `move_to_object`).
   - `high_priority` (bool): `true` to escalate dependencies, `false` to restore them.
+
+### scheduler_register — In-Memory PID Registration
+
+Register process PIDs directly in the scheduler's memory, avoiding file-based `processes.json` lookups. When a PID is registered via this service, the scheduler resolves it from memory (zero I/O overhead) instead of reading and parsing the JSON file on every priority adjustment.
+
+- **Service Name**: `scheduler_register`
+- **Service Type**: `robonix_sdk/RegisterProcess`
+- **Request**:
+  - `std_name` (string): The component's standard name (e.g., `srv::semantic_map`).
+  - `pid` (uint32): The process ID.
+  - `register` (bool): `true` to register, `false` to unregister.
+- **Fallback**: Components not registered via this service are still resolved from `~/.robonix/processes.json` (existing behavior).

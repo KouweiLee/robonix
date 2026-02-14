@@ -44,6 +44,7 @@ infrastructure_patterns:
   - Webots
   - webots_ros2
   - robot_launch
+  - xserver
 
 # GPU-using components (for xsched integration)
 # These components' GPU workloads will be scheduled by xsched

@@ -1,0 +1,5 @@
+string std_name
+uint32 pid
+bool do_register
+---
+bool ok
