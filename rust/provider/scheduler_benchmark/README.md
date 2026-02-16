@@ -62,7 +62,7 @@ Foreground skills executed one at a time while background workers run:
 | `skl::bench_grasp` | GPU-heavy | VLA model inference (image preprocessing + transformer + action decoding) |
 | `skl::bench_inspect` | CPU+GPU mixed | Full perception pipeline (image + CNN + point cloud) |
 
-GPU workloads use **PyTorch CUDA** when available; automatic **numpy CPU fallback** when not.
+GPU workloads use **PyTorch CUDA**;
 
 ## Prerequisites
 
@@ -145,7 +145,24 @@ python3 run_benchmark.py --scheduler-only
 
 # Custom config and runs
 python3 run_benchmark.py --config config/benchmark.yaml --runs 3 --output-dir ./my_results
+
+# Quantify xsched GPU scheduling overhead (isolated, no contention)
+python3 run_benchmark.py --xsched-overhead
 ```
+
+### XSched Overhead Benchmark
+
+To isolate xsched interception and scheduling overhead from CPU scheduler effects:
+
+```bash
+# Ensure xserver is running first
+~/.robonix/bin/xserver HPF 50000
+
+# Run overhead benchmark (pure VLA GPU workload, no background workers)
+python3 run_benchmark.py --xsched-overhead
+```
+
+This compares latency with and without xsched LD_PRELOAD on the same workload, quantifying the overhead of CUDA call interception and xsched queue management.
 
 ### Advanced GPU Scheduling Options
 

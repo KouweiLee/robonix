@@ -753,6 +753,10 @@ def main():
         help="Only run baseline (no scheduler)",
     )
     parser.add_argument(
+        "--xsched-overhead", action="store_true",
+        help="Quantify xsched GPU scheduling overhead (isolated, no contention)",
+    )
+    parser.add_argument(
         "--comparison", action="store_true", default=True,
         help="Run full A/B comparison (default)",
     )
@@ -797,6 +801,16 @@ def main():
 
     runner = BenchmarkRunner(config)
     try:
+        if args.xsched_overhead:
+            from scheduler_benchmark.xsched_overhead import run_overhead_benchmark
+            output_path = os.path.join(config.output_dir, "xsched_overhead.json")
+            run_overhead_benchmark(
+                iterations=200,
+                warmup=20,
+                output_file=output_path,
+            )
+            logger.info("XSched overhead benchmark complete. Results in: %s", config.output_dir)
+            return
         if args.baseline_only:
             results = runner.run(scheduler_enabled=False)
             _save_results(config.output_dir, "baseline", results)

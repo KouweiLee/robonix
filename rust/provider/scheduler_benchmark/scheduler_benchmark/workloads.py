@@ -12,20 +12,12 @@ performs one iteration of work, returning wall-clock elapsed time in seconds.
 
 import time
 import numpy as np
-from typing import Optional
-
-# Try to import torch for GPU workloads
-try:
-    import torch
-    _TORCH_CUDA = torch.cuda.is_available()
-except ImportError:
-    torch = None
-    _TORCH_CUDA = False
+import torch
 
 
 def gpu_available() -> bool:
     """Check if GPU (CUDA) workloads are supported."""
-    return _TORCH_CUDA
+    return torch.cuda.is_available()
 
 
 # ---------------------------------------------------------------------------
@@ -232,26 +224,21 @@ class CPUAudioProcess:
 
 
 # ---------------------------------------------------------------------------
-# GPU Workloads (PyTorch CUDA, with CPU fallback)
+# GPU Workloads (PyTorch CUDA required)
 # ---------------------------------------------------------------------------
 
 class GPUGemm:
     """
     GPU matrix multiply - simulates dense linear algebra in neural networks.
-    Falls back to CPU numpy if CUDA is not available.
+    Requires CUDA.
     """
 
     def __init__(self, size: int = 2048):
         self.size = size
-        if _TORCH_CUDA:
-            self._a = torch.randn(size, size, device='cuda', dtype=torch.float32)
-            self._b = torch.randn(size, size, device='cuda', dtype=torch.float32)
-        else:
-            self._cpu = CPUGemm(min(size, 512))
+        self._a = torch.randn(size, size, device='cuda', dtype=torch.float32)
+        self._b = torch.randn(size, size, device='cuda', dtype=torch.float32)
 
     def run(self) -> float:
-        if not _TORCH_CUDA:
-            return self._cpu.run()
         torch.cuda.synchronize()
         start = time.perf_counter()
         torch.mm(self._a, self._b)
@@ -262,21 +249,17 @@ class GPUGemm:
 class GPUConv2d:
     """
     GPU 2D convolution - simulates CNN perception (object detection, segmentation).
+    Requires CUDA.
     """
 
     def __init__(self, batch: int = 4, in_ch: int = 64, out_ch: int = 128,
                  size: int = 112, kernel: int = 3):
         self.batch = batch
-        if _TORCH_CUDA:
-            self._x = torch.randn(batch, in_ch, size, size, device='cuda')
-            self._w = torch.randn(out_ch, in_ch, kernel, kernel, device='cuda')
-            self._pad = kernel // 2
-        else:
-            self._cpu = CPUGemm(min(size * 2, 512))
+        self._x = torch.randn(batch, in_ch, size, size, device='cuda')
+        self._w = torch.randn(out_ch, in_ch, kernel, kernel, device='cuda')
+        self._pad = kernel // 2
 
     def run(self) -> float:
-        if not _TORCH_CUDA:
-            return self._cpu.run()
         torch.cuda.synchronize()
         start = time.perf_counter()
         torch.nn.functional.conv2d(self._x, self._w, padding=self._pad)
@@ -288,7 +271,7 @@ class GPUTransformerBlock:
     """
     Simulates a transformer inference pass (self-attention + FFN).
     Models workloads like VLA (Vision-Language-Action), speech recognition,
-    and vision transformers.
+    and vision transformers. Requires CUDA.
     """
 
     def __init__(self, layers: int = 6, hidden: int = 768,
@@ -296,32 +279,22 @@ class GPUTransformerBlock:
         self.layers = layers
         self.hidden = hidden
         self.seq_len = seq_len
-        if _TORCH_CUDA:
-            self._x = torch.randn(batch, seq_len, hidden, device='cuda')
-            # Pre-allocate weight matrices for each layer
-            self._qkv_w = [
-                torch.randn(hidden, 3 * hidden, device='cuda') / (hidden ** 0.5)
-                for _ in range(layers)
-            ]
-            self._ffn_w1 = [
-                torch.randn(hidden, hidden * 4, device='cuda') / (hidden ** 0.5)
-                for _ in range(layers)
-            ]
-            self._ffn_w2 = [
-                torch.randn(hidden * 4, hidden, device='cuda') / ((hidden * 4) ** 0.5)
-                for _ in range(layers)
-            ]
-        else:
-            # CPU fallback: scale down
-            self._cpu_gemm = CPUGemm(min(hidden, 256))
-            self._layers_cpu = layers
+        self._x = torch.randn(batch, seq_len, hidden, device='cuda')
+        # Pre-allocate weight matrices for each layer
+        self._qkv_w = [
+            torch.randn(hidden, 3 * hidden, device='cuda') / (hidden ** 0.5)
+            for _ in range(layers)
+        ]
+        self._ffn_w1 = [
+            torch.randn(hidden, hidden * 4, device='cuda') / (hidden ** 0.5)
+            for _ in range(layers)
+        ]
+        self._ffn_w2 = [
+            torch.randn(hidden * 4, hidden, device='cuda') / ((hidden * 4) ** 0.5)
+            for _ in range(layers)
+        ]
 
     def run(self) -> float:
-        if not _TORCH_CUDA:
-            total = 0.0
-            for _ in range(self._layers_cpu):
-                total += self._cpu_gemm.run()
-            return total
         torch.cuda.synchronize()
         start = time.perf_counter()
         x = self._x
