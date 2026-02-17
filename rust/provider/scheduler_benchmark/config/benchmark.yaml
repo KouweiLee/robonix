@@ -12,16 +12,16 @@ num_runs: 1               # Number of runs per skill per condition
 # std_name must match entries in scheduler.yaml for the scheduler to manage them.
 background_workers:
   perception:
-    rate_hz: 10.0
+    rate_hz: 30.0
     std_name: srv::bench_perception
   slam:
-    rate_hz: 5.0
+    rate_hz: 10.0
     std_name: srv::bench_slam
   speech:
-    rate_hz: 3.0
+    rate_hz: 10.0
     std_name: srv::bench_speech
   motion_plan:
-    rate_hz: 8.0
+    rate_hz: 10.0
     std_name: srv::bench_motion_plan
 
 # Benchmark skills
@@ -54,6 +54,8 @@ skills:
       - prm::camera.rgb
       - prm::camera.depth
       - srv::bench_perception
+      - srv::bench_motion_plan  # Needs arm trajectory
+      - srv::bench_speech       # Triggered by voice command
 
   - name: "skl::bench_inspect"
     module: scheduler_benchmark.skills.inspect_skill
@@ -65,3 +67,4 @@ skills:
       - prm::camera.rgb
       - prm::camera.depth
       - srv::bench_perception
+      - srv::bench_slam         # Needs location context

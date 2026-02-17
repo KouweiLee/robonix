@@ -646,7 +646,7 @@ class BenchmarkRunner:
             skill_cfg.topic_prefix,
             skill_id,
             {**skill_cfg.params, "iterations": skill_cfg.iterations,
-             "warmup": skill_cfg.warmup},
+             "warmup": skill_cfg.warmup, "dependencies": skill_cfg.dependencies},
             output_file,
             scheduler.enabled,
         )

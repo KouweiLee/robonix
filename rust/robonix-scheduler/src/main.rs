@@ -581,48 +581,77 @@ impl PolicyGovernor {
         seen.into_iter().collect()
     }
 
-    /// Set Linux scheduling priority for a process. No pre-flight liveness check —
-    /// the kernel syscalls themselves return ESRCH for dead processes, which we handle
-    /// inline. This avoids an extra `kill(pid, 0)` syscall on every call.
+    /// Helper to get all thread IDs (TIDs) for a given process PID from /proc
+    fn get_thread_ids(pid: u32) -> Vec<u32> {
+        let mut tids = Vec::new();
+        // Always include the main PID itself (which is the main thread ID)
+        tids.push(pid);
+
+        let path = format!("/proc/{}/task", pid);
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if let Ok(fname) = entry.file_name().into_string() {
+                    if let Ok(tid) = fname.parse::<u32>() {
+                        if tid != pid {
+                            tids.push(tid);
+                        }
+                    }
+                }
+            }
+        }
+        tids
+    }
+
+    /// Set Linux scheduling priority for a process and all its threads.
+    /// Iterates over /proc/<pid>/task/ to find all TIDs.
     fn set_linux_priority(pid: u32, name: &str, level: Option<PriorityLevel>) {
+        let tids = Self::get_thread_ids(pid);
+        if tids.len() > 1 {
+            debug!("Setting priority for {} (PID {}) and {} threads", name, pid, tids.len() - 1);
+        }
+
+        for tid in tids {
+            Self::set_linux_priority_for_tid(tid, name, level);
+        }
+    }
+
+    /// Apply priority to a specific thread/task ID.
+    fn set_linux_priority_for_tid(tid: u32, name: &str, level: Option<PriorityLevel>) {
         unsafe {
             match level {
                 Some(PriorityLevel::LatencyCritical) => {
                     // RT scheduling is still thread-based in Linux
                     let mut param: libc::sched_param = std::mem::zeroed();
                     param.sched_priority = 5; 
-                    if libc::sched_setscheduler(pid as libc::pid_t, libc::SCHED_RR, &param) == 0 {
-                        info!("Set {} (PID {}) to RT (SCHED_RR) priority 5", name, pid);
+                    if libc::sched_setscheduler(tid as libc::pid_t, libc::SCHED_RR, &param) == 0 {
+                        debug!("Set {} (TID {}) to RT (SCHED_RR) priority 5", name, tid);
                     } else {
                         let err = std::io::Error::last_os_error();
                         if err.raw_os_error() == Some(libc::ESRCH) {
-                            debug!("RT skipped for {} (PID {}): process exited", name, pid);
                             return;
                         }
-                        error!("RT failed for {} (PID {}): {}. Fallback to nice.", name, pid, err);
-                        let _ = libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, -15);
+                        debug!("RT failed for {} (TID {}): {}. Fallback to nice.", name, tid, err);
+                        let _ = libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, -15);
                     }
                 }
                 Some(PriorityLevel::ThroughputCritical) => {
-                    // Use PRIO_PROCESS instead of PRIO_PGRP to avoid boosting unintended siblings in the same group (e.g. shells)
-                    if libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, -10) != 0 {
+                    // Use PRIO_PROCESS for each TID
+                    if libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, -10) != 0 {
                         let err = std::io::Error::last_os_error();
-                        if err.raw_os_error() == Some(libc::ESRCH) {
-                            debug!("Nice skipped for {} (PID {}): process exited", name, pid);
-                        } else {
-                            error!("Failed nice for {} (PID {}): {}", name, pid, err);
+                        if err.raw_os_error() != Some(libc::ESRCH) {
+                            debug!("Failed nice for {} (TID {}): {}", name, tid, err);
                         }
                     } else {
-                        info!("Adjusted {} (PID {}) nice to -10", name, pid);
+                        debug!("Adjusted {} (TID {}) nice to -10", name, tid);
                     }
                 }
                 None => {
-                    // Restore priority for the process
+                    // Restore priority
                     let mut param: libc::sched_param = std::mem::zeroed();
                     param.sched_priority = 0;
-                    let _ = libc::sched_setscheduler(pid as libc::pid_t, libc::SCHED_OTHER, &param);
-                    let _ = libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, 0);
-                    info!("Restored {} (PID {}) to Normal", name, pid);
+                    let _ = libc::sched_setscheduler(tid as libc::pid_t, libc::SCHED_OTHER, &param);
+                    let _ = libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 0);
+                    debug!("Restored {} (TID {}) to Normal", name, tid);
                 }
             }
         }
@@ -631,6 +660,28 @@ impl PolicyGovernor {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Check command line arguments manually since we don't use clap yet
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--help" | "-h" => {
+                println!("Robonix Scheduler - Policy Governor Service");
+                println!("Usage: robonix-scheduler");
+                println!("\nConfiguration is loaded from ~/.robonix/scheduler.yaml");
+                return Ok(());
+            }
+            "--version" | "-v" => {
+                println!("robonix-scheduler v{}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            _ => {
+                eprintln!("Error: Unknown argument '{}'", args[1]);
+                eprintln!("Usage: robonix-scheduler [--help|--version]");
+                std::process::exit(1);
+            }
+        }
+    }
+
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info,robonix_scheduler=debug,rustdds=off"));
     info!("robonix scheduler starting...");
 

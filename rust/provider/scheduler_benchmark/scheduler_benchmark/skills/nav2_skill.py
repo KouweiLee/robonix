@@ -19,12 +19,14 @@ import time
 from typing import Optional
 
 import rclpy
+import threading
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 
 from scheduler_benchmark.workloads import NavigationWorkload
 from scheduler_benchmark.metrics import MetricsCollector
+from scheduler_benchmark.dependency_topics import get_dependency_topics, DependencyWaiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,21 +115,29 @@ class BenchNavSkill(Node):
         scan_grid = params.get("scan_grid", DEFAULT_SCAN_GRID)
         output_file = params.get("output_file", "")
         scheduler_enabled = params.get("scheduler_enabled", False)
+        dependencies = params.get("dependencies", [])
 
         logger.info(
-            "Starting benchmark: iterations=%d, warmup=%d, grid=%d, scheduler=%s",
-            iterations, warmup, grid_size, scheduler_enabled,
+            "Starting benchmark: iterations=%d, warmup=%d, grid=%d, deps=%s, scheduler=%s",
+            iterations, warmup, grid_size, dependencies, scheduler_enabled,
         )
 
         self._running = True
         self._publish_status(skill_id, "running", message="Benchmark started")
 
-        # Run benchmark
+        # Run benchmark in a separate thread to avoid blocking ROS2 callbacks
+        threading.Thread(
+            target=self._run_benchmark_thread,
+            args=(skill_id, iterations, warmup, grid_size, scan_grid,
+                  output_file, scheduler_enabled, dependencies),
+            daemon=True
+        ).start()
+
+    def _run_benchmark_thread(self, *args):
+        """Wrapper to run benchmark in thread and handle results."""
+        skill_id = args[0]
         try:
-            result = self._run_benchmark(
-                skill_id, iterations, warmup, grid_size, scan_grid,
-                output_file, scheduler_enabled,
-            )
+            result = self._run_benchmark(*args)
             self._publish_status(skill_id, "finished", result=result)
         except Exception as e:
             logger.error("Benchmark failed: %s", e, exc_info=True)
@@ -137,9 +147,12 @@ class BenchNavSkill(Node):
 
     def _run_benchmark(self, skill_id: str, iterations: int, warmup: int,
                        grid_size: int, scan_grid: int, output_file: str,
-                       scheduler_enabled: bool) -> dict:
+                       scheduler_enabled: bool, dependencies: list) -> dict:
         """Execute the navigation benchmark workload."""
         workload = NavigationWorkload(grid_size=grid_size, scan_grid=scan_grid)
+        dep_topics = get_dependency_topics(dependencies)
+        dep_waiter = DependencyWaiter(self, dep_topics) if dep_topics else None
+
         collector = MetricsCollector(
             skill_name="skl::bench_nav",
             scheduler_enabled=scheduler_enabled,
@@ -153,6 +166,10 @@ class BenchNavSkill(Node):
             if not self._running:
                 logger.info("Benchmark interrupted at iteration %d", i)
                 break
+
+            # Wait for dependency data (srv::bench_slam) before each iteration
+            if dep_waiter and not dep_waiter.wait_for_dependencies(timeout_sec=2.0):
+                logger.warning("Iteration %d: dependency timeout, proceeding anyway", i + 1)
 
             t_start = collector.begin_iteration()
             workload.run()

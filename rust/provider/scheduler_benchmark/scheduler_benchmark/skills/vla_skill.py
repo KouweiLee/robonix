@@ -19,12 +19,14 @@ import time
 from typing import Optional
 
 import rclpy
+import threading
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 
 from scheduler_benchmark.workloads import VLAWorkload, gpu_available
 from scheduler_benchmark.metrics import MetricsCollector
+from scheduler_benchmark.dependency_topics import get_dependency_topics, DependencyWaiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,6 +119,7 @@ class BenchGraspSkill(Node):
         seq_len = params.get("seq_len", DEFAULT_SEQ_LEN)
         output_file = params.get("output_file", "")
         scheduler_enabled = params.get("scheduler_enabled", False)
+        dependencies = params.get("dependencies", [])
 
         logger.info(
             "Starting VLA benchmark: iterations=%d, warmup=%d, layers=%d, "
@@ -128,11 +131,17 @@ class BenchGraspSkill(Node):
         self._running = True
         self._publish_status(skill_id, "running", message="VLA benchmark started")
 
+        threading.Thread(
+            target=self._run_benchmark_thread,
+            args=(skill_id, iterations, warmup, image_size, layers,
+                  hidden, seq_len, output_file, scheduler_enabled, dependencies),
+            daemon=True
+        ).start()
+
+    def _run_benchmark_thread(self, *args):
+        skill_id = args[0]
         try:
-            result = self._run_benchmark(
-                skill_id, iterations, warmup, image_size, layers,
-                hidden, seq_len, output_file, scheduler_enabled,
-            )
+            result = self._run_benchmark(*args)
             self._publish_status(skill_id, "finished", result=result)
         except Exception as e:
             logger.error("Benchmark failed: %s", e, exc_info=True)
@@ -143,7 +152,7 @@ class BenchGraspSkill(Node):
     def _run_benchmark(self, skill_id: str, iterations: int, warmup: int,
                        image_size: int, layers: int, hidden: int,
                        seq_len: int, output_file: str,
-                       scheduler_enabled: bool) -> dict:
+                       scheduler_enabled: bool, dependencies: list) -> dict:
         """Execute the VLA benchmark workload."""
         workload = VLAWorkload(
             image_size=image_size,
@@ -151,6 +160,9 @@ class BenchGraspSkill(Node):
             hidden=hidden,
             seq_len=seq_len,
         )
+        dep_topics = get_dependency_topics(dependencies)
+        dep_waiter = DependencyWaiter(self, dep_topics) if dep_topics else None
+
         collector = MetricsCollector(
             skill_name="skl::bench_grasp",
             scheduler_enabled=scheduler_enabled,
@@ -164,6 +176,10 @@ class BenchGraspSkill(Node):
             if not self._running:
                 logger.info("Benchmark interrupted at iteration %d", i)
                 break
+
+            # Wait for dependency data (prm::camera.*, srv::bench_perception)
+            if dep_waiter and not dep_waiter.wait_for_dependencies(timeout_sec=2.0):
+                logger.warning("Iteration %d: dependency timeout, proceeding anyway", i + 1)
 
             t_start = collector.begin_iteration()
             workload.run()
