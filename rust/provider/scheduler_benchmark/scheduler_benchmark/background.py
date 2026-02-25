@@ -105,10 +105,15 @@ class PublishingBackgroundWorker:
         
         # Publish to all topics
         msg = String()
+        # Create a payload to simulate realistic data transfer size (e.g. 50KB)
+        # This forces the DDS middleware to do some work (memory copy/serialization)
+        payload = "x" * 50000 
+        
         msg.data = json.dumps({
             "source": self.name,
             "iteration": self._iteration,
             "timestamp": time.perf_counter(),
+            "payload": payload, 
         })
         for pub in self._pubs:
             pub.publish(msg)

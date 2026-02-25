@@ -53,26 +53,31 @@ class CPUPathPlan:
 
     def __init__(self, grid_size: int = 300):
         self.grid_size = grid_size
-        # Create a random occupancy grid (True = free)
+        # Create a deterministic occupancy grid (1.0 = free, 0.0 = obstacle)
+        np.random.seed(42)  # Fixed seed for reproducibility
         self._grid = np.random.random((grid_size, grid_size)).astype(np.float32)
-        self._grid[self._grid < 0.25] = np.inf  # obstacles (~25%)
-        self._grid[self._grid != np.inf] = 1.0
+        self._grid[self._grid < 0.25] = 0.0  # obstacles (~25%)
+        self._grid[self._grid != 0.0] = 1.0
+        
+        # Pre-allocate output buffer to avoid allocation overhead in loop
+        # distance_transform_edt requires float64 output
+        self._output = np.zeros_like(self._grid, dtype=np.float64)
 
     def run(self) -> float:
-        """Run one planning iteration via distance transform wavefront."""
-        g = self._grid.copy()
-        size = self.grid_size
+        """
+        Run one planning iteration via distance transform.
+        Simulates costmap inflation/update which is O(N^2) memory bound.
+        """
+        import scipy.ndimage
         start = time.perf_counter()
-        # Forward pass (top-left to bottom-right)
-        for i in range(1, size):
-            g[i, :] = np.minimum(g[i, :], g[i - 1, :] + 1.0)
-        for j in range(1, size):
-            g[:, j] = np.minimum(g[:, j], g[:, j - 1] + 1.0)
-        # Backward pass (bottom-right to top-left)
-        for i in range(size - 2, -1, -1):
-            g[i, :] = np.minimum(g[i, :], g[i + 1, :] + 1.0)
-        for j in range(size - 2, -1, -1):
-            g[:, j] = np.minimum(g[:, j], g[:, j + 1] + 1.0)
+        
+        # Simulates a costmap update: compute distance to nearest obstacle
+        # varied slightly to prevent perfect caching if OS is smart, 
+        # though in this case we want deterministic load.
+        # We invert grid because edt computes distance to zero.
+        # Use distances parameter for output buffer instead of 'output'
+        scipy.ndimage.distance_transform_edt(self._grid, return_distances=True, return_indices=False, distances=self._output)
+        
         return time.perf_counter() - start
 
 
@@ -85,16 +90,40 @@ class CPUScanMatch:
 
     def __init__(self, scan_points: int = 360, grid_size: int = 256):
         self.grid_size = grid_size
-        self._ref = np.random.randn(grid_size, grid_size).astype(np.float32)
-        self._scan = np.random.randn(grid_size, grid_size).astype(np.float32)
+        np.random.seed(42)
+        # Pre-generate multiple frames to simulate robot motion
+        # This prevents perfect branch prediction/caching while keeping deterministic load
+        self._refs = [np.random.randn(grid_size, grid_size).astype(np.float32) for _ in range(5)]
+        self._scans = [np.random.randn(grid_size, grid_size).astype(np.float32) for _ in range(5)]
+        self._idx = 0
 
     def run(self) -> float:
-        """Run one scan matching iteration via FFT cross-correlation."""
+        """
+        Run one scan matching iteration via FFT cross-correlation.
+        Simulates a Correlative Scan Matcher that searches over multiple orientations.
+        This increases the computational density to match real SLAM front-ends.
+        """
         start = time.perf_counter()
-        ref_fft = np.fft.fft2(self._ref)
-        scan_fft = np.fft.fft2(self._scan)
-        corr = np.fft.ifft2(ref_fft * np.conj(scan_fft))
-        _ = np.unravel_index(np.argmax(np.abs(corr)), corr.shape)
+        
+        # Cycle through pre-generated frames
+        ref = self._refs[self._idx]
+        scan = self._scans[self._idx]
+        self._idx = (self._idx + 1) % 5
+        
+        # Simulate searching over 5 different orientations (rotations)
+        # Real CSM would rotate the scan and re-fft, or use log-polar transform.
+        # Here we simulate the compute load by running FFT multiple times.
+        best_score = -1.0
+        for _ in range(5):
+            # In a real algo, we'd rotate 'scan' here.
+            # For benchmark load, we just repeat the heavy FFT ops.
+            ref_fft = np.fft.fft2(ref)
+            scan_fft = np.fft.fft2(scan)
+            corr = np.fft.ifft2(ref_fft * np.conj(scan_fft))
+            score = np.max(np.abs(corr))
+            if score > best_score:
+                best_score = score
+        
         return time.perf_counter() - start
 
 
@@ -106,26 +135,37 @@ class CPUPointCloud:
 
     def __init__(self, num_points: int = 100000):
         self.num_points = num_points
-        self._cloud = np.random.randn(num_points, 3).astype(np.float32)
+        np.random.seed(42)
+        # Pre-allocate point cloud buffers (simulate circular buffer of sensor data)
+        self._clouds = [np.random.randn(num_points, 3).astype(np.float32) for _ in range(3)]
+        self._idx = 0
 
     def run(self) -> float:
         """Run point cloud processing: voxel grid filter + PCA normals."""
         start = time.perf_counter()
+        
+        cloud = self._clouds[self._idx]
+        self._idx = (self._idx + 1) % 3
+        
         # Voxel grid downsampling simulation
         voxel_size = 0.05
-        quantized = np.floor(self._cloud / voxel_size).astype(np.int32)
-        # Use structured array for unique voxels
+        quantized = np.floor(cloud / voxel_size).astype(np.int32)
+        
+        # Use structured array for unique voxels - heavy CPU sorting task
         _, idx = np.unique(
             quantized.view(np.dtype((np.void, quantized.dtype.itemsize * 3))),
             return_index=True
         )
-        downsampled = self._cloud[idx]
+        downsampled = cloud[idx]
+        
         # Compute covariance for normal estimation (batch)
+        # This is heavy linear algebra on small matrices
         n = min(len(downsampled), 5000)
         subset = downsampled[:n]
         centered = subset - subset.mean(axis=0)
         cov = centered.T @ centered / n
         _ = np.linalg.eigh(cov)
+        
         return time.perf_counter() - start
 
 
@@ -133,45 +173,47 @@ class CPUImageProcess:
     """
     Simulates camera image processing pipeline:
     debayer, resize, histogram equalization, edge detection.
+    Uses vectorized operations to represent optimized C++ OpenCV pipelines.
     """
 
     def __init__(self, width: int = 640, height: int = 480):
         self.width = width
         self.height = height
-        self._image = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+        np.random.seed(42)
+        # Pre-allocate frames
+        self._images = [
+            np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
+            for _ in range(3)
+        ]
+        self._idx = 0
+        
+        # Pre-allocate kernels
+        self._gaussian_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
+        self._sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+        self._sobel_y = self._sobel_x.T
 
     def run(self) -> float:
-        """Run image processing pipeline."""
+        """Run image processing pipeline using vectorized ops."""
+        import scipy.ndimage
         start = time.perf_counter()
-        img = self._image.astype(np.float32)
-        # Gaussian blur (separable, simulated via 1D convolutions)
-        kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
-        for c in range(3):
-            # Horizontal pass
-            for row in range(self.height):
-                img[row, :, c] = np.convolve(img[row, :, c], kernel, mode='same')
-            # Vertical pass
-            for col in range(self.width):
-                img[:, col, c] = np.convolve(img[:, col, c], kernel, mode='same')
-        # Grayscale conversion
-        gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
-        # Sobel edge detection (using numpy-only convolution fallback)
-        sx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
-        sy = sx.T
-        try:
-            from scipy.signal import convolve2d
-            gx = convolve2d(gray, sx, mode='same', boundary='fill')
-            gy = convolve2d(gray, sy, mode='same', boundary='fill')
-        except ImportError:
-            # Fallback: manual padded convolution via slicing
-            pad = np.pad(gray, 1, mode='constant')
-            gx = np.zeros_like(gray)
-            gy = np.zeros_like(gray)
-            for di in range(3):
-                for dj in range(3):
-                    gx += sx[di, dj] * pad[di:di + self.height, dj:dj + self.width]
-                    gy += sy[di, dj] * pad[di:di + self.height, dj:dj + self.width]
+        
+        img = self._images[self._idx].astype(np.float32)
+        self._idx = (self._idx + 1) % 3
+        
+        # Gaussian blur using scipy (highly optimized C backend)
+        # Represents typical preprocessing
+        blurred = scipy.ndimage.gaussian_filter(img, sigma=1.0)
+        
+        # Grayscale conversion (vectorized)
+        gray = 0.299 * blurred[:, :, 0] + 0.587 * blurred[:, :, 1] + 0.114 * blurred[:, :, 2]
+        
+        # Sobel edge detection using scipy convolution
+        # Represents feature extraction
+        gx = scipy.ndimage.convolve(gray, self._sobel_x)
+        gy = scipy.ndimage.convolve(gray, self._sobel_y)
+        
         _ = np.sqrt(gx ** 2 + gy ** 2)
+        
         return time.perf_counter() - start
 
 

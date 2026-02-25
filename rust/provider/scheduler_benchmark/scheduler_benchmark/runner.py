@@ -793,7 +793,8 @@ def main():
             "skill_init_time": config.skill_init_time,
             "num_runs": config.num_runs,
             "skills": [
-                {"name": s.name, "iterations": s.iterations, "warmup": s.warmup}
+                {"name": s.name, "iterations": s.iterations, "warmup": s.warmup,
+                "dependencies": s.dependencies}
                 for s in config.skills
             ],
             "background_workers": config.background_workers,

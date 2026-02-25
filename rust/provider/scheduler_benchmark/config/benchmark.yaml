@@ -20,9 +20,9 @@ background_workers:
   speech:
     rate_hz: 10.0
     std_name: srv::bench_speech
-  motion_plan:
-    rate_hz: 10.0
-    std_name: srv::bench_motion_plan
+  # motion_plan:
+  #   rate_hz: 10.0
+  #   std_name: srv::bench_motion_plan
 
 # Benchmark skills
 # Each skill runs sequentially. Background workers create contention.
@@ -30,11 +30,11 @@ skills:
   - name: "skl::bench_nav"
     module: scheduler_benchmark.skills.nav2_skill
     topic_prefix: /robot1/skill/bench_nav
-    iterations: 200
+    iterations: 100
     warmup: 20
     params:
-      grid_size: 300      # Occupancy grid size for path planning
-      scan_grid: 200      # Grid size for scan matching
+      grid_size: 500      # Occupancy grid size for path planning
+      scan_grid: 256      # Grid size for scan matching
     dependencies:
       - prm::base.navigate
       - prm::base.pose.cov
@@ -43,7 +43,7 @@ skills:
   - name: "skl::bench_grasp"
     module: scheduler_benchmark.skills.vla_skill
     topic_prefix: /robot1/skill/bench_grasp
-    iterations: 150
+    iterations: 100
     warmup: 15
     params:
       image_size: 224     # Input image size
@@ -54,13 +54,13 @@ skills:
       - prm::camera.rgb
       - prm::camera.depth
       - srv::bench_perception
-      - srv::bench_motion_plan  # Needs arm trajectory
+      # - srv::bench_motion_plan  # Needs arm trajectory
       - srv::bench_speech       # Triggered by voice command
 
   - name: "skl::bench_inspect"
     module: scheduler_benchmark.skills.inspect_skill
     topic_prefix: /robot1/skill/bench_inspect
-    iterations: 150
+    iterations: 100
     warmup: 15
     params: {}
     dependencies:
