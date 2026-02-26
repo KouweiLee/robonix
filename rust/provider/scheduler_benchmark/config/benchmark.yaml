@@ -15,14 +15,18 @@ background_workers:
     rate_hz: 30.0      
     std_name: srv::bench_perception
   lidar_slam:
-    rate_hz: 10.0
+    rate_hz: 15.0
     std_name: srv::bench_lidar_slam
   speech:
     rate_hz: 4.0          # Background voice activity detection
     std_name: srv::bench_speech
-  # safety_controller:      # Real-time collision monitoring & safety stops
-  #   rate_hz: 20.0
-  #   std_name: srv::bench_safety
+  cpu_noise:
+    rate_hz: 10.0         # Unexpected CPU noise (e.g. log compression)
+    std_name: srv::bench_cpu_noise
+  gpu_noise:
+    rate_hz: 10.0         # Unexpected GPU noise (e.g. background inference)
+    std_name: srv::bench_gpu_noise
+
 
 # Benchmark skills
 # Each skill runs sequentially. Background workers create contention.

@@ -36,6 +36,7 @@ from scheduler_benchmark.workloads import (
     SpeechWorkload,
     MotionPlanWorkload,
     CPUGemm,
+    GPUGemm,
     CPUPointCloud,
 )
 
@@ -180,12 +181,32 @@ def run_motion_plan_bg(rate_hz: float = 8.0):
     worker.run()
 
 
+def run_cpu_noise_bg(rate_hz: float = 10.0):
+    """Run background CPU-only noise workload."""
+    worker = PublishingBackgroundWorker(
+        "cpu_noise_bg", CPUGemm(size=512), rate_hz,
+        output_topics=[],
+    )
+    worker.run()
+
+
+def run_gpu_noise_bg(rate_hz: float = 10.0):
+    """Run background GPU-only noise workload."""
+    worker = PublishingBackgroundWorker(
+        "gpu_noise_bg", GPUGemm(size=1024), rate_hz,
+        output_topics=[],
+    )
+    worker.run()
+
+
 # Entry points for subprocess spawning
 WORKERS = {
     "perception": run_perception_bg,
     "lidar_slam": run_lidar_slam_bg,
     "speech": run_speech_bg,
     "motion_plan": run_motion_plan_bg,
+    "cpu_noise": run_cpu_noise_bg,
+    "gpu_noise": run_gpu_noise_bg,
 }
 
 

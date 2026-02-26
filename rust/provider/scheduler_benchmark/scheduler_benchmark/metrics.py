@@ -20,8 +20,9 @@ from typing import List, Optional, Dict, Any
 class IterationSample:
     """A single iteration timing sample."""
     iteration: int
-    latency_s: float  # Wall-clock seconds for this iteration
-    timestamp: float   # Unix timestamp when iteration started
+    latency_s: float  # Wall-clock seconds for this iteration (computation)
+    cycle_s: float    # Total time since last iteration completion
+    timestamp: float   # Unix timestamp when iteration ended
 
 
 @dataclass
@@ -35,8 +36,8 @@ class SkillMetrics:
     start_time: float = 0.0
     end_time: float = 0.0
 
-    def add_sample(self, iteration: int, latency_s: float, timestamp: float):
-        self.samples.append(IterationSample(iteration, latency_s, timestamp))
+    def add_sample(self, iteration: int, latency_s: float, cycle_s: float, timestamp: float):
+        self.samples.append(IterationSample(iteration, latency_s, cycle_s, timestamp))
 
     @property
     def effective_samples(self) -> List[IterationSample]:
@@ -48,71 +49,56 @@ class SkillMetrics:
         """Latency values (seconds) for effective samples."""
         return [s.latency_s for s in self.effective_samples]
 
+    @property
+    def cycle_times(self) -> List[float]:
+        """Cycle times (seconds) for effective samples."""
+        return [s.cycle_s for s in self.effective_samples]
+
     def compute_stats(self) -> Dict[str, Any]:
         """Compute comprehensive statistics from collected samples."""
         lats = self.latencies
+        cycles = self.cycle_times
         if not lats:
             return {"error": "no samples"}
 
+        n = len(lats)
         lats_sorted = sorted(lats)
-        n = len(lats_sorted)
-        total_time = self.end_time - self.start_time if self.end_time > 0 else 0
+        cycles_sorted = sorted(cycles)
+        
+        # Throughput calculation: strictly based on the measured period (excluding warmup)
+        measured_duration = sum(cycles)
+        throughput = n / measured_duration if measured_duration > 0 else 0
 
-        mean = sum(lats) / n
-        variance = sum((x - mean) ** 2 for x in lats) / n
-        stddev = math.sqrt(variance)
+        # Latency metrics (P95)
+        mean_lat = sum(lats) / n
+        p50_lat = lats_sorted[max(0, n // 2)]
+        p95_lat = lats_sorted[max(0, int(n * 0.95) - 1)]
 
-        # Percentiles
-        def percentile(p):
-            k = (n - 1) * p / 100.0
-            f = math.floor(k)
-            c = math.ceil(k)
-            if f == c:
-                return lats_sorted[int(k)]
-            return lats_sorted[f] * (c - k) + lats_sorted[c] * (k - f)
-
-        p50 = percentile(50)
-        p90 = percentile(90)
-        p95 = percentile(95)
-        p99 = percentile(99)
-
-        # Throughput: iterations per second
-        throughput = n / total_time if total_time > 0 else 0
-
-        # Jitter: coefficient of variation (stddev / mean)
-        cv = stddev / mean if mean > 0 else 0
-
-        # Tail ratio: P99 / P50 (higher = more tail latency, less stable)
-        tail_ratio = p99 / p50 if p50 > 0 else 0
-
-        # Consecutive jitter: mean absolute difference between adjacent iterations
-        consec_diffs = [abs(lats[i + 1] - lats[i]) for i in range(len(lats) - 1)]
-        consec_jitter = sum(consec_diffs) / len(consec_diffs) if consec_diffs else 0
+        # Completion Interval Stability (Cycle Jitter)
+        # Measures the variation in time between consecutive iteration completions.
+        mean_cycle = sum(cycles) / n
+        stddev_cycle = math.sqrt(sum((x - mean_cycle) ** 2 for x in cycles) / n)
+        cv_cycle = stddev_cycle / mean_cycle if mean_cycle > 0 else 0
+        p95_cycle = cycles_sorted[max(0, int(n * 0.95) - 1)]
 
         return {
             "skill_name": self.skill_name,
             "scheduler_enabled": self.scheduler_enabled,
             "num_samples": n,
-            "warmup_iterations": self.warmup_iterations,
-            "total_wall_time_s": round(total_time, 4),
+            "measured_duration_s": round(measured_duration, 4),
             "latency": {
-                "mean_ms": round(mean * 1000, 3),
-                "median_ms": round(p50 * 1000, 3),
-                "stddev_ms": round(stddev * 1000, 3),
-                "min_ms": round(lats_sorted[0] * 1000, 3),
-                "max_ms": round(lats_sorted[-1] * 1000, 3),
-                "p50_ms": round(p50 * 1000, 3),
-                "p90_ms": round(p90 * 1000, 3),
-                "p95_ms": round(p95 * 1000, 3),
-                "p99_ms": round(p99 * 1000, 3),
+                "mean_ms": round(mean_lat * 1000, 3),
+                "p50_ms": round(p50_lat * 1000, 3),
+                "p95_ms": round(p95_lat * 1000, 3),
             },
             "throughput": {
                 "iterations_per_sec": round(throughput, 2),
             },
             "stability": {
-                "coefficient_of_variation": round(cv, 4),
-                "tail_ratio_p99_p50": round(tail_ratio, 3),
-                "consecutive_jitter_ms": round(consec_jitter * 1000, 3),
+                "interval_cv": round(cv_cycle, 4), # Jitter of completion intervals
+                "coefficient_of_variation": round(cv_cycle, 4), # Alias
+                "p95_interval_ms": round(p95_cycle * 1000, 3),
+                "max_interval_ms": round(max(cycles) * 1000, 3),
             },
         }
 
@@ -172,10 +158,12 @@ class MetricsCollector:
             warmup_iterations=warmup_iterations,
         )
         self._iteration = 0
+        self._t_last_end = 0.0
 
     def start(self):
         """Mark the start of the benchmark run."""
         self.metrics.start_time = time.time()
+        self._t_last_end = time.perf_counter()
 
     def begin_iteration(self) -> float:
         """Begin timing an iteration. Returns the start timestamp."""
@@ -187,22 +175,19 @@ class MetricsCollector:
         Args:
             start_time: Value returned by begin_iteration().
         """
-        elapsed = time.perf_counter() - start_time
+        now = time.perf_counter()
+        elapsed = now - start_time
+        # Cycle time is total time between iteration completions
+        cycle = now - self._t_last_end if self._t_last_end > 0 else elapsed
+        
         self.metrics.add_sample(
             iteration=self._iteration,
             latency_s=elapsed,
+            cycle_s=cycle,
             timestamp=time.time(),
         )
         self._iteration += 1
-
-    def record_iteration(self, latency_s: float):
-        """Directly record an iteration with known latency."""
-        self.metrics.add_sample(
-            iteration=self._iteration,
-            latency_s=latency_s,
-            timestamp=time.time(),
-        )
-        self._iteration += 1
+        self._t_last_end = now
 
     def finish(self) -> SkillMetrics:
         """Mark the end and return completed metrics."""

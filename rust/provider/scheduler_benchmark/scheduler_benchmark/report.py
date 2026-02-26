@@ -99,13 +99,8 @@ def generate_comparison_report(
         # Latency metrics (lower is better)
         latency_metrics = [
             ("Mean Latency (ms)", "mean_ms"),
-            ("Median Latency (ms)", "median_ms"),
-            ("P90 Latency (ms)", "p90_ms"),
+            ("P50 Latency (ms)", "p50_ms"),
             ("P95 Latency (ms)", "p95_ms"),
-            ("P99 Latency (ms)", "p99_ms"),
-            ("Min Latency (ms)", "min_ms"),
-            ("Max Latency (ms)", "max_ms"),
-            ("Std Dev (ms)", "stddev_ms"),
         ]
 
         lines.append(f"  {'Latency:'}")
@@ -122,7 +117,7 @@ def generate_comparison_report(
                 overall_improvements.append(pct)
 
         # Throughput (higher is better)
-        lines.append(f"  {'Throughput:'}")
+        lines.append(f"  {'Throughput (Excl. Warmup):'}")
         bv = bl_tp.get("iterations_per_sec", 0)
         sv = sc_tp.get("iterations_per_sec", 0)
         pct = _pct_change_higher_better(bv, sv)
@@ -131,15 +126,15 @@ def generate_comparison_report(
             f"    {'Iterations/sec':<33} {bv:>10.2f}   {sv:>10.2f}   "
             f"{pct:>+8.1f}% {arrow}"
         )
+        overall_improvements.append(-pct) # Higher is better for throughput, so negate for overall avg
 
         # Stability metrics (lower is better)
         stability_metrics = [
-            ("Coeff of Variation", "coefficient_of_variation"),
-            ("Tail Ratio (P99/P50)", "tail_ratio_p99_p50"),
-            ("Consecutive Jitter (ms)", "consecutive_jitter_ms"),
+            ("Interval Stability (CV)", "interval_cv"),
+            ("P95 Interval (ms)", "p95_interval_ms"),
         ]
 
-        lines.append(f"  {'Stability:'}")
+        lines.append(f"  {'Stability (Completion Intervals):'}")
         for label, key in stability_metrics:
             bv = bl_stab.get(key, 0)
             sv = sc_stab.get(key, 0)
@@ -149,7 +144,7 @@ def generate_comparison_report(
                 f"    {label:<33} {bv:>10.4f}   {sv:>10.4f}   "
                 f"{pct:>+8.1f}% {arrow}"
             )
-            if key == "coefficient_of_variation":
+            if key == "interval_cv":
                 overall_improvements.append(pct)
 
         lines.append("")
