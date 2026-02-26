@@ -25,10 +25,9 @@ This benchmark quantifies the scheduling gap by running realistic synthetic work
 │  Background Workers │      │  Foreground Skill (1 at a   │
 │  (always running)   │      │  time, measured)             │
 │                     │      │                              │
-│  • Perception (C+G) │      │  • bench_nav    (CPU-heavy)  │
-│  • SLAM       (CPU) │ ◄──► │  • bench_grasp  (GPU-heavy)  │
-│  • Speech     (C+G) │      │  • bench_inspect (mixed)     │
-│  • Motion Plan(CPU) │      │                              │
+│  • Perception (CPU) │      │  • bench_nav    (CPU-heavy)  │
+│  • LiDAR+SLAM (CPU) │ ◄──► │  • bench_grasp  (GPU-heavy)  │
+│  • Speech (CPU+GPU) │      │  • bench_inspect (mixed)     │
 └─────────────────────┘      └──────────────────────────────┘
          │                                │
          ▼                                ▼
@@ -47,10 +46,9 @@ These processes simulate always-running robot subsystems that compete for CPU/GP
 
 | Worker | Workload Profile | Default Rate |
 |--------|-----------------|--------------|
-| **Perception** | Camera image processing + CNN detection + point cloud analysis | 10 Hz |
-| **SLAM** | LiDAR scan matching (FFT cross-correlation) + pose graph optimization | 5 Hz |
-| **Speech** | Mel spectrogram extraction + transformer decoder inference | 3 Hz |
-| **Motion Planning** | Collision checking + trajectory optimization (GEMM) | 8 Hz |
+| **Perception** | Camera driver: Debayering, resizing, rectification | 30 Hz |
+| **LiDAR & SLAM** | LiDAR driver (decoding + TF) + SLAM (scan matching + pose graph) | 10 Hz |
+| **Speech** | Mel spectrogram extraction + transformer decoder inference | 4 Hz |
 
 ### Benchmark Skills
 
@@ -183,20 +181,18 @@ num_runs: 1               # Runs per skill per condition
 
 background_workers:
   perception:
-    rate_hz: 10.0          # Iteration rate (higher = more contention)
-  slam:
-    rate_hz: 5.0
+    rate_hz: 30.0          # Iteration rate (higher = more contention)
+  lidar_slam:
+    rate_hz: 10.0
   speech:
-    rate_hz: 3.0
-  motion_plan:
-    rate_hz: 8.0
+    rate_hz: 4.0
 
 skills:
   - name: "skl::bench_nav"
-    iterations: 200        # Total iterations
+    iterations: 100        # Total iterations
     warmup: 20             # Iterations to discard (warm-up)
     params:
-      grid_size: 300       # Larger = heavier CPU load
+      grid_size: 500       # Larger = heavier CPU load
 ```
 
 ### Tuning for your hardware

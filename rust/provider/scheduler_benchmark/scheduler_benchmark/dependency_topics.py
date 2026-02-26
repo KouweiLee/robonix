@@ -11,20 +11,12 @@ from typing import List
 
 # std_name -> ROS2 topic (published by background workers)
 DEPENDENCY_TOPICS = {
-    # SLAM Worker outputs
-    "srv::bench_slam": "/robot1/bench/slam/map",
-    "prm::base.pose.cov": "/robot1/bench/slam/pose",
-
     # Perception Worker outputs
-    "srv::bench_perception": "/robot1/bench/perception/detections",
-    "prm::camera.rgb": "/robot1/bench/camera/rgb",
-    "prm::camera.depth": "/robot1/bench/camera/depth",
+    # Maps to camera stream since perception_bg is now a camera driver
+    "srv::bench_perception": "/robot1/bench/camera/rgb",
 
-    # Motion Plan Worker outputs
-    "srv::bench_motion_plan": "/robot1/bench/motion/plan",
-    # Usually prm::base.navigate is handled by the nav stack itself, 
-    # but let's assume it gets global path hints or map updates from SLAM/Nav service.
-    "prm::base.navigate": "/robot1/bench/nav/goal", 
+    # LiDAR & SLAM Worker outputs (Merged)
+    "srv::bench_lidar_slam": "/robot1/bench/slam/map",
 
     # Speech Worker outputs
     "srv::bench_speech": "/robot1/bench/speech/command",

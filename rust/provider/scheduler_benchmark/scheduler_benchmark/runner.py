@@ -68,10 +68,9 @@ class BenchmarkConfig:
     output_dir: str = "benchmark_results"
     # Background worker configuration
     background_workers: Dict[str, dict] = field(default_factory=lambda: {
-        "perception": {"rate_hz": 10.0, "std_name": "srv::bench_perception"},
-        "slam": {"rate_hz": 5.0, "std_name": "srv::bench_slam"},
-        "speech": {"rate_hz": 3.0, "std_name": "srv::bench_speech"},
-        "motion_plan": {"rate_hz": 8.0, "std_name": "srv::bench_motion_plan"},
+        "perception": {"rate_hz": 30.0, "std_name": "srv::bench_perception"},
+        "lidar_slam": {"rate_hz": 10.0, "std_name": "srv::bench_lidar_slam"},
+        "speech": {"rate_hz": 4.0, "std_name": "srv::bench_speech"},
     })
     # Skill benchmarks to run
     skills: List[SkillConfig] = field(default_factory=lambda: [
@@ -79,40 +78,31 @@ class BenchmarkConfig:
             name="skl::bench_nav",
             module="scheduler_benchmark.skills.nav2_skill",
             topic_prefix="/robot1/skill/bench_nav",
-            iterations=200,
+            iterations=100,
             warmup=20,
-            params={"grid_size": 300, "scan_grid": 200},
-            dependencies=[
-                "prm::base.navigate", "prm::base.pose.cov",
-                "srv::bench_slam",
-            ],
+            params={"grid_size": 500, "scan_grid": 256},
+            dependencies=["srv::bench_lidar_slam"],
         ),
         SkillConfig(
             name="skl::bench_grasp",
             module="scheduler_benchmark.skills.vla_skill",
             topic_prefix="/robot1/skill/bench_grasp",
-            iterations=150,
+            iterations=100,
             warmup=15,
             params={
                 "image_size": 224, "layers": 12,
                 "hidden": 768, "seq_len": 256,
             },
-            dependencies=[
-                "prm::camera.rgb", "prm::camera.depth",
-                "srv::bench_perception",
-            ],
+            dependencies=["srv::bench_perception"],
         ),
         SkillConfig(
             name="skl::bench_inspect",
             module="scheduler_benchmark.skills.inspect_skill",
             topic_prefix="/robot1/skill/bench_inspect",
-            iterations=150,
+            iterations=100,
             warmup=15,
             params={},
-            dependencies=[
-                "prm::camera.rgb", "prm::camera.depth",
-                "srv::bench_perception",
-            ],
+            dependencies=["srv::bench_perception", "srv::bench_lidar_slam"],
         ),
     ])
     # Settle time after starting background workers (seconds)

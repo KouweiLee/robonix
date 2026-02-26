@@ -12,17 +12,17 @@ num_runs: 1               # Number of runs per skill per condition
 # std_name must match entries in scheduler.yaml for the scheduler to manage them.
 background_workers:
   perception:
-    rate_hz: 30.0
+    rate_hz: 30.0      
     std_name: srv::bench_perception
-  slam:
+  lidar_slam:
     rate_hz: 10.0
-    std_name: srv::bench_slam
+    std_name: srv::bench_lidar_slam
   speech:
-    rate_hz: 10.0
+    rate_hz: 4.0          # Background voice activity detection
     std_name: srv::bench_speech
-  # motion_plan:
-  #   rate_hz: 10.0
-  #   std_name: srv::bench_motion_plan
+  # safety_controller:      # Real-time collision monitoring & safety stops
+  #   rate_hz: 20.0
+  #   std_name: srv::bench_safety
 
 # Benchmark skills
 # Each skill runs sequentially. Background workers create contention.
@@ -36,9 +36,7 @@ skills:
       grid_size: 500      # Occupancy grid size for path planning
       scan_grid: 256      # Grid size for scan matching
     dependencies:
-      - prm::base.navigate
-      - prm::base.pose.cov
-      - srv::bench_slam
+      - srv::bench_lidar_slam
 
   - name: "skl::bench_grasp"
     module: scheduler_benchmark.skills.vla_skill
@@ -51,11 +49,7 @@ skills:
       hidden: 768         # Hidden dimension
       seq_len: 256        # Sequence length
     dependencies:
-      - prm::camera.rgb
-      - prm::camera.depth
       - srv::bench_perception
-      # - srv::bench_motion_plan  # Needs arm trajectory
-      - srv::bench_speech       # Triggered by voice command
 
   - name: "skl::bench_inspect"
     module: scheduler_benchmark.skills.inspect_skill
@@ -64,7 +58,5 @@ skills:
     warmup: 15
     params: {}
     dependencies:
-      - prm::camera.rgb
-      - prm::camera.depth
       - srv::bench_perception
-      - srv::bench_slam         # Needs location context
+      - srv::bench_lidar_slam         # Needs location context and scan data

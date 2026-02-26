@@ -5,25 +5,20 @@
 # Skill dependency mapping:
 # When a skill is active, the scheduler boosts all listed components.
 skill_dependencies:
-  # Navigation benchmark: boost path planner + localization + SLAM
+  # Navigation benchmark: boost path planner + localization + SLAM/LIDAR
   skl::bench_nav:
-    - prm::base.navigate
-    - prm::base.pose.cov
-    - srv::bench_slam
+    - srv::bench_lidar_slam
     - skl::bench_nav
 
   # VLA grasping benchmark: boost cameras + perception pipeline
   skl::bench_grasp:
-    - prm::camera.rgb
-    - prm::camera.depth
     - srv::bench_perception
     - skl::bench_grasp
 
-  # Visual inspection: boost cameras + perception
+  # Visual inspection: boost cameras + perception + LIDAR/SLAM
   skl::bench_inspect:
-    - prm::camera.rgb
-    - prm::camera.depth
     - srv::bench_perception
+    - srv::bench_lidar_slam
     - skl::bench_inspect
 
   # Also keep existing skill configs for real robot operation

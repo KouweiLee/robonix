@@ -36,7 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger("bench_grasp")
 
 # Default benchmark parameters
-DEFAULT_ITERATIONS = 150
+DEFAULT_ITERATIONS = 100
 DEFAULT_WARMUP = 15
 DEFAULT_IMAGE_SIZE = 224
 DEFAULT_LAYERS = 12

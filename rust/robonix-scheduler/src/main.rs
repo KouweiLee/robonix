@@ -133,25 +133,23 @@ fn default_skill_dependencies() -> HashMap<String, Vec<String>> {
     m.insert(
         "skl::bench_nav".to_string(),
         vec![
-            "prm::base.navigate".to_string(),
-            "prm::base.pose.cov".to_string(),
-            "srv::bench_slam".to_string(),
+            "srv::bench_lidar_slam".to_string(),
+            "skl::bench_nav".to_string(),
         ],
     );
     m.insert(
         "skl::bench_grasp".to_string(),
         vec![
-            "prm::camera.rgb".to_string(),
-            "prm::camera.depth".to_string(),
             "srv::bench_perception".to_string(),
+            "skl::bench_grasp".to_string(),
         ],
     );
     m.insert(
         "skl::bench_inspect".to_string(),
         vec![
-            "prm::camera.rgb".to_string(),
-            "prm::camera.depth".to_string(),
             "srv::bench_perception".to_string(),
+            "srv::bench_lidar_slam".to_string(),
+            "skl::bench_inspect".to_string(),
         ],
     );
     m

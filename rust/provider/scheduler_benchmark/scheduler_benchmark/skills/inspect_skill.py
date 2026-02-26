@@ -24,7 +24,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 
-from scheduler_benchmark.workloads import PerceptionWorkload, gpu_available
+from scheduler_benchmark.workloads import HeavyPerceptionWorkload, gpu_available
 from scheduler_benchmark.metrics import MetricsCollector
 from scheduler_benchmark.dependency_topics import get_dependency_topics, DependencyWaiter
 
@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bench_inspect")
 
-DEFAULT_ITERATIONS = 150
+DEFAULT_ITERATIONS = 100
 DEFAULT_WARMUP = 15
 
 
@@ -143,7 +143,7 @@ class BenchInspectSkill(Node):
                        output_file: str, scheduler_enabled: bool,
                        dependencies: list) -> dict:
         """Execute the visual inspection benchmark workload."""
-        workload = PerceptionWorkload()
+        workload = HeavyPerceptionWorkload()
         dep_topics = get_dependency_topics(dependencies)
         dep_waiter = DependencyWaiter(self, dep_topics) if dep_topics else None
 

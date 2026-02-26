@@ -172,8 +172,8 @@ class CPUPointCloud:
 class CPUImageProcess:
     """
     Simulates camera image processing pipeline:
-    debayer, resize, histogram equalization, edge detection.
-    Uses vectorized operations to represent optimized C++ OpenCV pipelines.
+    format conversion, resizing, and rectification (undistortion).
+    Focuses on high memory bandwidth and pixel-wise remapping.
     """
 
     def __init__(self, width: int = 640, height: int = 480):
@@ -187,32 +187,56 @@ class CPUImageProcess:
         ]
         self._idx = 0
         
-        # Pre-allocate kernels
-        self._gaussian_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
-        self._sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
-        self._sobel_y = self._sobel_x.T
+        # Pre-compute rectification maps (simulating camera lens calibration)
+        # map_x and map_y describe where each output pixel comes from in the input.
+        rows, cols = height, width
+        y, x = np.indices((rows, cols), dtype=np.float32)
+        
+        # Create a simple radial distortion-like map
+        cx, cy = width / 2.0, height / 2.0
+        dx = (x - cx) / cx
+        dy = (y - cy) / cy
+        r = np.sqrt(dx**2 + dy**2)
+        distortion = 1.0 + 0.2 * r**2  # k1=0.2
+        
+        self._map_x = cx + dx * distortion * cx
+        self._map_y = cy + dy * distortion * cy
+        
+        # Clip maps to image boundaries
+        self._map_x = np.clip(self._map_x, 0, width - 1)
+        self._map_y = np.clip(self._map_y, 0, height - 1)
 
     def run(self) -> float:
-        """Run image processing pipeline using vectorized ops."""
+        """Run driver-level image pipeline: conversion, resize, rectification."""
         import scipy.ndimage
         start = time.perf_counter()
         
-        img = self._images[self._idx].astype(np.float32)
+        # 1. Simulate Debayer/Format Conversion (e.g. YUV -> RGB)
+        # Heavy memory read/write with simple math
+        img_uint8 = self._images[self._idx]
         self._idx = (self._idx + 1) % 3
         
-        # Gaussian blur using scipy (highly optimized C backend)
-        # Represents typical preprocessing
-        blurred = scipy.ndimage.gaussian_filter(img, sigma=1.0)
+        img = img_uint8.astype(np.float32)
+        # Simple weighted sum to simulate color space math
+        _ = 0.5 * img + 128.0
         
-        # Grayscale conversion (vectorized)
-        gray = 0.299 * blurred[:, :, 0] + 0.587 * blurred[:, :, 1] + 0.114 * blurred[:, :, 2]
+        # 2. Rectification (Lens Undistortion)
+        # This is the most realistic proxy for driver-level CPU load:
+        # non-linear memory access via mapping.
+        # We do it channel by channel to simulate typical implementation.
+        rectified = np.zeros_like(img)
+        for c in range(3):
+            scipy.ndimage.map_coordinates(
+                img[:, :, c], 
+                [self._map_y, self._map_x], 
+                order=1, 
+                mode='nearest',
+                output=rectified[:, :, c]
+            )
         
-        # Sobel edge detection using scipy convolution
-        # Represents feature extraction
-        gx = scipy.ndimage.convolve(gray, self._sobel_x)
-        gy = scipy.ndimage.convolve(gray, self._sobel_y)
-        
-        _ = np.sqrt(gx ** 2 + gy ** 2)
+        # 3. Downsampling (Simulate thumbnail or pyramid generation)
+        # Slicing is zero-copy in numpy, so we do a tiny bit of math to force a copy
+        _ = rectified[::2, ::2, :].copy()
         
         return time.perf_counter() - start
 
@@ -402,10 +426,11 @@ class VLAWorkload:
         return t1 + t2 + t3
 
 
-class PerceptionWorkload:
+class HeavyPerceptionWorkload:
     """
-    Composite workload simulating continuous perception pipeline:
-    camera preprocessing + CNN detection + point cloud processing.
+    Composite workload simulating full perception (Foreground Skill):
+    Camera prep + CNN detection + PointCloud analysis.
+    Used by 'bench_inspect' skill.
     """
 
     def __init__(self):
@@ -418,6 +443,56 @@ class PerceptionWorkload:
         t2 = self.detector.run()
         t3 = self.pointcloud.run()
         return t1 + t2 + t3
+
+
+class CameraStreamWorkload:
+    """
+    Composite workload simulating camera driver + preprocessing pipeline (Background Process):
+    Debayering, resizing, rectification.
+    Pure CPU workload, high memory bandwidth, continuous.
+    """
+
+    def __init__(self, width: int = 640, height: int = 480):
+        self.image_proc = CPUImageProcess(width, height)
+
+    def run(self) -> float:
+        return self.image_proc.run()
+
+
+class LidarStreamWorkload:
+    """
+    Composite workload simulating LiDAR driver + preprocessing pipeline (Background Process):
+    Packet decoding, coordinate transformation (TF), and point cloud assembly.
+    Focuses on intensive byte manipulation and small matrix-vector multiplications.
+    """
+
+    def __init__(self, num_points: int = 30000):
+        self.num_points = num_points
+        # Pre-allocate transform matrices for 32-line LiDAR-like scan
+        self._tf_matrix = np.eye(4, dtype=np.float32)
+        # Simulated raw UDP packets: num_points * 32 bytes (distance, intensity, azimuth, etc.)
+        self._raw_data = np.random.bytes(num_points * 32) 
+        self.point_proc = CPUPointCloud(num_points)
+
+    def run(self) -> float:
+        """Run LiDAR driver pipeline: packet decoding, TF, and point processing."""
+        start = time.perf_counter()
+        
+        # 1. Simulate Packet Decoding
+        # Iterate over "packets" and extract values (simulated by heavy slicing/viewing)
+        # This represents the byte manipulation needed to extract X,Y,Z from raw wire format.
+        _ = np.frombuffer(self._raw_data, dtype=np.uint8).reshape(-1, 32) # type: ignore
+        
+        # 2. Coordinate Transformation (TF)
+        # Apply [R|t] to points. This is O(N) matrix-vector math.
+        # We simulate this by doing a batch dot product.
+        points = np.random.randn(self.num_points, 3).astype(np.float32)
+        _ = points @ self._tf_matrix[:3, :3].T + self._tf_matrix[:3, 3]
+        
+        # 3. Downsampling & Normals (The original workload)
+        _ = self.point_proc.run()
+        
+        return time.perf_counter() - start
 
 
 class SLAMWorkload:
@@ -433,6 +508,23 @@ class SLAMWorkload:
     def run(self) -> float:
         t1 = self.scan_match.run()
         t2 = self.graph_opt.run()
+        return t1 + t2
+
+
+class LidarSLAMWorkload:
+    """
+    Composite workload simulating a tightly-coupled LiDAR-SLAM pipeline:
+    LiDAR driver (decoding + TF) + SLAM (scan matching + pose graph).
+    Used as a merged background process.
+    """
+
+    def __init__(self, num_points: int = 30000):
+        self.lidar = LidarStreamWorkload(num_points)
+        self.slam = SLAMWorkload()
+
+    def run(self) -> float:
+        t1 = self.lidar.run()
+        t2 = self.slam.run()
         return t1 + t2
 
 

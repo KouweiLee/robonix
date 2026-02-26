@@ -7,9 +7,9 @@ GPU resources, creating realistic resource contention with the active skill.
 Each background worker runs in its own process and can be started/stopped
 by the benchmark runner.
 
-Background workers that are skill dependencies (slam, perception) publish their
-output to ROS2 topics after each iteration. Skills subscribe and wait for this
-data before each workload iteration, modeling real data flow.
+Background workers that are skill dependencies publish their output to ROS2 
+topics after each iteration. Skills subscribe and wait for this data before 
+each workload iteration, modeling real data flow.
 """
 
 import argparse
@@ -19,25 +19,25 @@ import signal
 import sys
 import time
 import logging
-from typing import Optional
+import threading
+from typing import Optional, List, Any
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from std_msgs.msg import String
 
 from scheduler_benchmark.workloads import (
-    PerceptionWorkload,
+    HeavyPerceptionWorkload,
+    CameraStreamWorkload,
+    LidarStreamWorkload,
     SLAMWorkload,
+    LidarSLAMWorkload,
     SpeechWorkload,
     MotionPlanWorkload,
     CPUGemm,
     CPUPointCloud,
 )
-
-try:
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-    from std_msgs.msg import String
-    _RCLPY_AVAILABLE = True
-except ImportError:
-    _RCLPY_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,12 +49,12 @@ logger = logging.getLogger("benchmark.bg")
 
 class PublishingBackgroundWorker:
     """
-    Background worker that publishes output to one or more ROS2 topics after each iteration.
-    Models data producers that skills depend on (srv::* and prm::*).
+    Background worker that publishes workload output to ROS2 topics.
+    Each iteration runs the workload and then publishes to all configured topics.
     """
 
     def __init__(self, name: str, workload, target_rate_hz: float,
-                 output_topics: list):
+                 output_topics: List[str]):
         """
         Args:
             name: Worker name
@@ -69,7 +69,7 @@ class PublishingBackgroundWorker:
         self._running = True
         self._iteration = 0
         self._node: Optional[Node] = None
-        self._pubs = []
+        self._pubs: List[Any] = []
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -79,12 +79,10 @@ class PublishingBackgroundWorker:
         self._running = False
 
     def _init_ros2(self):
-        if not _RCLPY_AVAILABLE:
-            logger.warning("rclpy not available, publishing disabled")
-            return
         if not rclpy.ok():
             rclpy.init()
         self._node = rclpy.create_node(f"{self.name}_node")
+
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -106,7 +104,6 @@ class PublishingBackgroundWorker:
         # Publish to all topics
         msg = String()
         # Create a payload to simulate realistic data transfer size (e.g. 50KB)
-        # This forces the DDS middleware to do some work (memory copy/serialization)
         payload = "x" * 50000 
         
         msg.data = json.dumps({
@@ -117,8 +114,6 @@ class PublishingBackgroundWorker:
         })
         for pub in self._pubs:
             pub.publish(msg)
-        
-        rclpy.spin_once(self._node, timeout_sec=0.01)
 
     def run(self):
         """Main loop: run workload, publish output, rate limit."""
@@ -142,55 +137,11 @@ class PublishingBackgroundWorker:
         logger.info(f"{self.name}: Stopped after {self._iteration} iterations")
 
 
-class BackgroundWorker:
-    """
-    Base class for background contention workers.
-    Runs a workload in a tight loop at a configurable rate (iterations/sec).
-    Gracefully shuts down on SIGTERM/SIGINT.
-    """
-
-    def __init__(self, name: str, workload, target_rate_hz: float = 10.0):
-        self.name = name
-        self.workload = workload
-        self.target_period = 1.0 / target_rate_hz if target_rate_hz > 0 else 0
-        self._running = True
-        self._iteration = 0
-
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
-
-    def _handle_signal(self, signum, frame):
-        logger.info(f"{self.name}: Received signal {signum}, shutting down")
-        self._running = False
-
-    def run(self):
-        """Main loop: run workload at target rate until stopped."""
-        logger.info(f"{self.name}: Started (PID={os.getpid()}, period={self.target_period:.3f}s)")
-        while self._running:
-            start = time.perf_counter()
-            try:
-                elapsed = self.workload.run()
-            except Exception as e:
-                logger.warning(f"{self.name}: Workload error: {e}")
-                elapsed = 0
-
-            self._iteration += 1
-
-            # Rate limiting: sleep to maintain target period
-            remaining = self.target_period - (time.perf_counter() - start)
-            if remaining > 0:
-                time.sleep(remaining)
-
-        logger.info(f"{self.name}: Stopped after {self._iteration} iterations")
-
-
-def run_perception_bg(rate_hz: float = 10.0):
-    """Run background perception pipeline (camera + detection + pointcloud).
-    Publishes detections and simulated camera data."""
+def run_perception_bg(rate_hz: float = 30.0):
+    """Run background perception pipeline (camera + preprocessing)."""
     worker = PublishingBackgroundWorker(
-        "perception_bg", PerceptionWorkload(), rate_hz,
+        "perception_bg", CameraStreamWorkload(), rate_hz,
         output_topics=[
-            "/robot1/bench/perception/detections",
             "/robot1/bench/camera/rgb",
             "/robot1/bench/camera/depth",
         ],
@@ -198,22 +149,21 @@ def run_perception_bg(rate_hz: float = 10.0):
     worker.run()
 
 
-def run_slam_bg(rate_hz: float = 5.0):
-    """Run background SLAM (scan matching + graph optimization).
-    Publishes map, pose, and nav goals."""
+def run_lidar_slam_bg(rate_hz: float = 10.0):
+    """Run background merged LiDAR driver + SLAM pipeline."""
     worker = PublishingBackgroundWorker(
-        "slam_bg", SLAMWorkload(), rate_hz,
+        "lidar_slam_bg", LidarSLAMWorkload(), rate_hz,
         output_topics=[
+            "/robot1/bench/lidar/points",
             "/robot1/bench/slam/map",
             "/robot1/bench/slam/pose",
-            "/robot1/bench/nav/goal",
         ],
     )
     worker.run()
 
 
-def run_speech_bg(rate_hz: float = 3.0):
-    """Run background speech processing. Publishes voice commands."""
+def run_speech_bg(rate_hz: float = 4.0):
+    """Run background speech processing."""
     worker = PublishingBackgroundWorker(
         "speech_bg", SpeechWorkload(), rate_hz,
         output_topics=["/robot1/bench/speech/command"],
@@ -222,7 +172,7 @@ def run_speech_bg(rate_hz: float = 3.0):
 
 
 def run_motion_plan_bg(rate_hz: float = 8.0):
-    """Run background motion planning. Publishes arm trajectories."""
+    """Run background motion planning."""
     worker = PublishingBackgroundWorker(
         "motion_plan_bg", MotionPlanWorkload(), rate_hz,
         output_topics=["/robot1/bench/motion/plan"],
@@ -233,7 +183,7 @@ def run_motion_plan_bg(rate_hz: float = 8.0):
 # Entry points for subprocess spawning
 WORKERS = {
     "perception": run_perception_bg,
-    "slam": run_slam_bg,
+    "lidar_slam": run_lidar_slam_bg,
     "speech": run_speech_bg,
     "motion_plan": run_motion_plan_bg,
 }

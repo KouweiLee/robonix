@@ -19,9 +19,9 @@ skills:
     status_topic: /robot1/skill/bench_nav/status
     entry: python3 -m scheduler_benchmark.skills.nav2_skill
     start_args: >
-      {"iterations": "int: number of benchmark iterations (default 200)",
+      {"iterations": "int: number of benchmark iterations (default 100)",
        "warmup": "int: warmup iterations to discard (default 20)",
-       "grid_size": "int: occupancy grid size (default 300)",
+       "grid_size": "int: occupancy grid size (default 500)",
        "output_file": "str: path to save results JSON"}
     status: >
       {"skill_id": "str", "state": "str: running|finished|error",
@@ -37,7 +37,7 @@ skills:
     status_topic: /robot1/skill/bench_grasp/status
     entry: python3 -m scheduler_benchmark.skills.vla_skill
     start_args: >
-      {"iterations": "int: number of iterations (default 150)",
+      {"iterations": "int: number of iterations (default 100)",
        "warmup": "int: warmup iterations (default 15)",
        "layers": "int: transformer layers (default 12)",
        "hidden": "int: hidden dimension (default 768)",
@@ -56,7 +56,7 @@ skills:
     status_topic: /robot1/skill/bench_inspect/status
     entry: python3 -m scheduler_benchmark.skills.inspect_skill
     start_args: >
-      {"iterations": "int: number of iterations (default 150)",
+      {"iterations": "int: number of iterations (default 100)",
        "warmup": "int: warmup iterations (default 15)",
        "output_file": "str: path to save results JSON"}
     status: >

@@ -36,10 +36,10 @@ logging.basicConfig(
 logger = logging.getLogger("bench_nav")
 
 # Default benchmark parameters
-DEFAULT_ITERATIONS = 200
+DEFAULT_ITERATIONS = 100
 DEFAULT_WARMUP = 20
-DEFAULT_GRID_SIZE = 300
-DEFAULT_SCAN_GRID = 200
+DEFAULT_GRID_SIZE = 500
+DEFAULT_SCAN_GRID = 256
 
 
 class BenchNavSkill(Node):
@@ -167,7 +167,7 @@ class BenchNavSkill(Node):
                 logger.info("Benchmark interrupted at iteration %d", i)
                 break
 
-            # Wait for dependency data (srv::bench_slam) before each iteration
+            # Wait for dependency data (srv::bench_lidar_slam) before each iteration
             if dep_waiter and not dep_waiter.wait_for_dependencies(timeout_sec=2.0):
                 logger.warning("Iteration %d: dependency timeout, proceeding anyway", i + 1)
 
