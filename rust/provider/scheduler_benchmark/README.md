@@ -8,9 +8,9 @@ In a robotic system, multiple subsystems run concurrently — perception, SLAM, 
 
 This benchmark quantifies the scheduling gap by running realistic synthetic workloads with and without the scheduler, measuring:
 
-- **Latency** — mean, P50, P90, P95, P99 per-iteration latency
-- **Throughput** — iterations per second
-- **Stability** — coefficient of variation (CV), tail ratio (P99/P50), consecutive jitter
+- **Latency** — mean, P50, P95, P99 per-iteration latency
+- **Throughput** — iterations per second (excl. warmup)
+- **Stability** — coefficient of variation (CV), interval stddev, P95 interval
 
 ## Architecture
 
@@ -42,13 +42,15 @@ This benchmark quantifies the scheduling gap by running realistic synthetic work
 
 ### Background Contention Workers
 
-These processes simulate always-running robot subsystems that compete for CPU/GPU:
+These processes simulate always-running robot subsystems that compete for CPU/GPU.
+Rates and workers are configurable in `config/benchmark.yaml`:
 
 | Worker | Workload Profile | Default Rate |
 |--------|-----------------|--------------|
 | **Perception** | Camera driver: Debayering, resizing, rectification | 30 Hz |
-| **LiDAR & SLAM** | LiDAR driver (decoding + TF) + SLAM (scan matching + pose graph) | 10 Hz |
+| **LiDAR & SLAM** | LiDAR driver (decoding + TF) + SLAM (scan matching + pose graph) | 10–15 Hz |
 | **Speech** | Mel spectrogram extraction + transformer decoder inference | 4 Hz |
+| **CPU noise / GPU noise** | Optional extra contention (configurable) | 10 Hz |
 
 ### Benchmark Skills
 
@@ -60,7 +62,7 @@ Foreground skills executed one at a time while background workers run:
 | `skl::bench_grasp` | GPU-heavy | VLA model inference (image preprocessing + transformer + action decoding) |
 | `skl::bench_inspect` | CPU+GPU mixed | Full perception pipeline (image + CNN + point cloud) |
 
-GPU workloads use **PyTorch CUDA**;
+GPU workloads use **PyTorch CUDA**.
 
 ## Prerequisites
 
@@ -146,6 +148,9 @@ python3 run_benchmark.py --config config/benchmark.yaml --runs 3 --output-dir ./
 
 # Quantify xsched GPU scheduling overhead (isolated, no contention)
 python3 run_benchmark.py --xsched-overhead
+
+# Regenerate report from existing results
+python3 -m scheduler_benchmark.report benchmark_results/<timestamp>
 ```
 
 ### XSched Overhead Benchmark
@@ -172,7 +177,8 @@ The benchmark automatically detects if `xsched` is running. To ensure it's used:
 
 ## Configuration
 
-All benchmark parameters are configurable via `config/benchmark.yaml`:
+All benchmark parameters are configurable via `config/benchmark.yaml`.
+Below shows key tunable fields (see the full file for module/topic_prefix/dependencies):
 
 ```yaml
 output_dir: benchmark_results
@@ -183,7 +189,7 @@ background_workers:
   perception:
     rate_hz: 30.0          # Iteration rate (higher = more contention)
   lidar_slam:
-    rate_hz: 10.0
+    rate_hz: 15.0
   speech:
     rate_hz: 4.0
 
@@ -234,13 +240,27 @@ benchmark_results/20260212_110000/
   skl::bench_nav
   ============================================================================
   Latency:
-    Mean Latency (ms)                      3.53         2.89      -18.1% v
-    P99 Latency (ms)                       5.21         3.12      -40.1% v
-  Throughput:
-    Iterations/sec                       283.29       345.95      +22.1% ^
-  Stability:
-    Coeff of Variation                   0.1520       0.0340      -77.6% v
-    Consecutive Jitter (ms)              0.4200       0.0800      -81.0% v
+    Mean Latency (ms)                      87.85        33.75      -61.6% v
+    P50 Latency (ms)                       82.58        33.68      -59.2% v
+    P95 Latency (ms)                      130.24        34.10      -73.8% v
+    P99 Latency (ms)                      136.54        80.55      -41.0% v
+  Throughput (Excl. Warmup):
+    Iterations/sec                         10.58        13.63      +28.8% ^
+  Stability (Completion Intervals):
+    Interval CV (coeff. of var.)          0.2799       0.3844      +37.3% ^
+    Interval Jitter (StdDev ms)           25.5380      27.8130       +8.9% ^
+    P95 Interval (ms)                   134.3710     129.7400       -3.4% v
+
+================================================================================
+  SUMMARY
+================================================================================
+  Per-dimension (scheduler vs baseline):
+  Latency (mean + P95):               scheduler 31.0% lower   (better)
+  Throughput:                         scheduler 47.7% higher  (better)
+  Stability (interval StdDev):        scheduler 19.6% lower   (better)
+
+  Overall average: -32.3% (mean latency, P95 latency, throughput, interval stddev)
+  Verdict: robonix-scheduler performs better
 ```
 
 ## Project Structure

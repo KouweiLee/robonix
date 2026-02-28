@@ -5,16 +5,16 @@ Benchmark Report Generator - Compares scheduler vs baseline results.
 Generates a text-based comparison report showing:
   - Per-skill latency comparison (mean, P50, P95, P99)
   - Throughput comparison
-  - Stability comparison (CV, tail ratio, consecutive jitter)
-  - Improvement percentages
-  - Summary verdict
+  - Stability comparison (interval CV, interval stddev, P95 interval)
+  - Per-dimension summary (scheduler vs baseline)
+  - Overall verdict
 """
 
 import json
 import os
 import sys
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,7 +77,14 @@ def generate_comparison_report(
     lines.append(f"{'Metric':<35} {'Baseline':>12} {'Scheduler':>12} {'Change':>12}")
     lines.append("-" * 80)
 
-    overall_improvements = []
+    # Per-dimension improvement tracking (for summary)
+    # Negative = improvement for latency/stability; for throughput we store -pct
+    latency_changes: List[float] = []
+    throughput_changes: List[float] = []
+    stability_changes: List[float] = []
+    # For overall avg: mean_latency, p95_latency, throughput, interval_stddev_ms
+    # Use stddev (not CV) for stability: within-skill comparison, absolute jitter in ms is more meaningful
+    overall_changes: List[float] = []
 
     for skill_name in all_skills:
         bl = baseline_stats.get(skill_name)
@@ -101,6 +108,7 @@ def generate_comparison_report(
             ("Mean Latency (ms)", "mean_ms"),
             ("P50 Latency (ms)", "p50_ms"),
             ("P95 Latency (ms)", "p95_ms"),
+            ("P99 Latency (ms)", "p99_ms"),
         ]
 
         lines.append(f"  {'Latency:'}")
@@ -113,10 +121,11 @@ def generate_comparison_report(
                 f"    {label:<33} {bv:>10.2f}   {sv:>10.2f}   "
                 f"{pct:>+8.1f}% {arrow}"
             )
-            if key == "mean_ms":
-                overall_improvements.append(pct)
+            if key in ("mean_ms", "p95_ms"):
+                latency_changes.append(pct)
+                overall_changes.append(pct)
 
-        # Throughput (higher is better)
+        # Throughput (higher is better) - captures scheduling/wait time, not redundant with latency
         lines.append(f"  {'Throughput (Excl. Warmup):'}")
         bv = bl_tp.get("iterations_per_sec", 0)
         sv = sc_tp.get("iterations_per_sec", 0)
@@ -126,11 +135,15 @@ def generate_comparison_report(
             f"    {'Iterations/sec':<33} {bv:>10.2f}   {sv:>10.2f}   "
             f"{pct:>+8.1f}% {arrow}"
         )
-        overall_improvements.append(-pct) # Higher is better for throughput, so negate for overall avg
+        throughput_changes.append(-pct)  # Negate so negative = improvement
+        overall_changes.append(-pct)
 
         # Stability metrics (lower is better)
+        # StdDev: absolute jitter in ms; preferred for within-skill baseline vs scheduler comparison.
+        # CV: relative; can be distorted when mean cycle changes significantly.
         stability_metrics = [
-            ("Interval Stability (CV)", "interval_cv"),
+            ("Interval CV (coeff. of var.)", "interval_cv"),
+            ("Interval Jitter (StdDev ms)", "interval_stddev_ms"),
             ("P95 Interval (ms)", "p95_interval_ms"),
         ]
 
@@ -144,8 +157,9 @@ def generate_comparison_report(
                 f"    {label:<33} {bv:>10.4f}   {sv:>10.4f}   "
                 f"{pct:>+8.1f}% {arrow}"
             )
-            if key == "interval_cv":
-                overall_improvements.append(pct)
+            if key == "interval_stddev_ms":
+                stability_changes.append(pct)
+                overall_changes.append(pct)
 
         lines.append("")
 
@@ -153,30 +167,57 @@ def generate_comparison_report(
     lines.append("=" * 80)
     lines.append("  SUMMARY")
     lines.append("=" * 80)
-    if overall_improvements:
-        avg_improvement = sum(overall_improvements) / len(overall_improvements)
+
+    if overall_changes:
+        # Per-dimension averages
+        avg_latency = sum(latency_changes) / len(latency_changes) if latency_changes else 0
+        avg_throughput = sum(throughput_changes) / len(throughput_changes) if throughput_changes else 0
+        avg_stability = sum(stability_changes) / len(stability_changes) if stability_changes else 0
+        avg_overall = sum(overall_changes) / len(overall_changes)
+
+        def _dim_line(label: str, val: float, lower_better: bool) -> str:
+            if abs(val) < 0.1:
+                return f"  {label:<35} scheduler ~0% change  (comparable)"
+            if lower_better:
+                direction = "lower" if val < 0 else "higher"
+                verdict = "better" if val < 0 else "worse"
+            else:
+                direction = "higher" if val < 0 else "lower"
+                verdict = "better" if val < 0 else "worse"
+            return f"  {label:<35} scheduler {abs(val):.1f}% {direction:6}  ({verdict})"
+
+        lines.append("  Per-dimension (scheduler vs baseline):")
+        lines.append(_dim_line("Latency (mean + P95):", avg_latency, lower_better=True))
+        lines.append(_dim_line("Throughput:", avg_throughput, lower_better=False))  # stored as -pct
+        lines.append(_dim_line("Stability (interval StdDev):", avg_stability, lower_better=True))
+        lines.append("")
         lines.append(
-            f"  Average metric change: {avg_improvement:+.1f}%"
+            f"  Overall average: {avg_overall:+.1f}% "
+            "(mean latency, P95 latency, throughput, interval stddev)"
         )
-        if avg_improvement < -5:
-            lines.append(
-                "  Verdict: robonix-scheduler provides SIGNIFICANT improvement"
-            )
-        elif avg_improvement < -1:
-            lines.append(
-                "  Verdict: robonix-scheduler provides MODERATE improvement"
-            )
-        elif avg_improvement < 1:
-            lines.append(
-                "  Verdict: Results are COMPARABLE (within noise)"
-            )
+
+        # Verdict: >= 2 per-dimension metrics improve -> scheduler better; any >20% -> mention regression
+        dim_metrics = [
+            ("Latency", avg_latency),
+            ("Throughput", avg_throughput),
+            ("Stability", avg_stability),
+        ]
+        good_count = sum(1 for _, v in dim_metrics if v < 0)
+        regressed = [(name, v) for name, v in dim_metrics if v > 20]
+
+        if good_count >= 2:
+            verdict = "Verdict: robonix-scheduler performs better"
         else:
-            lines.append(
-                "  Verdict: Baseline performs better (check configuration)"
-            )
+            verdict = "Verdict: baseline (Linux CFS) performs better"
+
+        if regressed:
+            regressed_str = ", ".join(f"{name} (+{v:.0f}%)" for name, v in regressed)
+            verdict += f"; {regressed_str} regressed significantly (>20%)"
+        verdict = "  " + verdict
+        lines.append(verdict)
     lines.append("")
-    lines.append("  Legend: v = lower (better for latency/jitter)")
-    lines.append("          ^ = higher (better for throughput)")
+    lines.append("  Legend: v = decrease (better for latency/stability)")
+    lines.append("          ^ = increase (better for throughput, worse for stability)")
     lines.append("=" * 80)
 
     report = "\n".join(lines)
@@ -188,10 +229,16 @@ def generate_comparison_report(
     logger.info("Report saved to %s", report_path)
 
     # Also save as JSON for programmatic access
+    avg_overall_pct = sum(overall_changes) / len(overall_changes) if overall_changes else 0
     json_report = {
         "skills": {},
-        "overall_avg_change_pct": sum(overall_improvements) / len(overall_improvements)
-        if overall_improvements else 0,
+        "overall_avg_change_pct": avg_overall_pct,
+        "summary": {
+            "avg_latency_pct": sum(latency_changes) / len(latency_changes) if latency_changes else 0,
+            "avg_throughput_pct": sum(throughput_changes) / len(throughput_changes) if throughput_changes else 0,
+            "avg_stability_pct": sum(stability_changes) / len(stability_changes) if stability_changes else 0,
+            "overall_metrics": "mean_latency, p95_latency, throughput, interval_stddev_ms",
+        },
     }
     for skill_name in all_skills:
         bl = baseline_stats.get(skill_name, {})
@@ -213,13 +260,13 @@ def generate_comparison_report(
                         bl.get("throughput", {}).get("iterations_per_sec", 0),
                         sc.get("throughput", {}).get("iterations_per_sec", 0),
                     ),
-                    "cv_pct": _pct_change(
-                        bl.get("stability", {}).get("coefficient_of_variation", 0),
-                        sc.get("stability", {}).get("coefficient_of_variation", 0),
+                    "jitter_stddev_pct": _pct_change(
+                        bl.get("stability", {}).get("interval_stddev_ms", 0),
+                        sc.get("stability", {}).get("interval_stddev_ms", 0),
                     ),
-                    "tail_ratio_pct": _pct_change(
-                        bl.get("stability", {}).get("tail_ratio_p99_p50", 0),
-                        sc.get("stability", {}).get("tail_ratio_p99_p50", 0),
+                    "p95_interval_pct": _pct_change(
+                        bl.get("stability", {}).get("p95_interval_ms", 0),
+                        sc.get("stability", {}).get("p95_interval_ms", 0),
                     ),
                 },
             }

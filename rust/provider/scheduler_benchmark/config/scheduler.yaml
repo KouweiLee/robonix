@@ -20,19 +20,6 @@ skill_dependencies:
     - srv::bench_perception
     - srv::bench_lidar_slam
     - skl::bench_inspect
-
-  # Also keep existing skill configs for real robot operation
-  skl::move_to_object:
-    - prm::base.navigate
-    - prm::base.pose.cov
-    - srv::semantic_map
-    - prm::camera.rgb
-    - prm::camera.depth
-
-  skl::wandering:
-    - prm::base.navigate
-    - prm::base.pose.cov
-
 # Infrastructure processes to boost when any skill is active
 infrastructure_patterns:
   - webots
@@ -45,6 +32,8 @@ infrastructure_patterns:
 # These components' GPU workloads will be scheduled by xsched
 xpu_components:
   - srv::bench_perception
+  - srv::bench_speech
+  - srv::bench_gpu_noise
   - skl::bench_grasp
   - skl::bench_inspect
 

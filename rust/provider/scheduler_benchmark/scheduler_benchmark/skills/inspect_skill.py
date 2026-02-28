@@ -188,11 +188,11 @@ class BenchInspectSkill(Node):
             logger.info("Results saved to %s", output_file)
 
         logger.info(
-            "Inspection benchmark complete: mean=%.2fms, p99=%.2fms, "
+            "Inspection benchmark complete: mean=%.2fms, p95=%.2fms, "
             "jitter_cv=%.4f, throughput=%.1f iter/s",
             stats["latency"]["mean_ms"],
-            stats["latency"]["p99_ms"],
-            stats["stability"]["coefficient_of_variation"],
+            stats["latency"]["p95_ms"],
+            stats["stability"]["interval_cv"],
             stats["throughput"]["iterations_per_sec"],
         )
 

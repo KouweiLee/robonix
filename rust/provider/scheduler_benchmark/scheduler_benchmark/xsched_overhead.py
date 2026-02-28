@@ -149,8 +149,8 @@ def print_overhead_report(no_xsched: dict, with_xsched: dict) -> None:
 
     mean_a = get_lat("mean_ms", no_xsched)
     mean_b = get_lat("mean_ms", with_xsched)
-    p50_a = get_lat("median_ms", no_xsched)
-    p50_b = get_lat("median_ms", with_xsched)
+    p50_a = get_lat("p50_ms", no_xsched)
+    p50_b = get_lat("p50_ms", with_xsched)
     p99_a = get_lat("p99_ms", no_xsched)
     p99_b = get_lat("p99_ms", with_xsched)
 

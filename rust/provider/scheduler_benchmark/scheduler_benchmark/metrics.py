@@ -12,7 +12,6 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 
@@ -69,10 +68,15 @@ class SkillMetrics:
         measured_duration = sum(cycles)
         throughput = n / measured_duration if measured_duration > 0 else 0
 
-        # Latency metrics (P95)
+        # Latency metrics (P50, P95, P99)
         mean_lat = sum(lats) / n
-        p50_lat = lats_sorted[max(0, n // 2)]
+        # Median: average of two middle values for even n
+        if n % 2 == 1:
+            p50_lat = lats_sorted[(n - 1) // 2]
+        else:
+            p50_lat = (lats_sorted[n // 2 - 1] + lats_sorted[n // 2]) / 2
         p95_lat = lats_sorted[max(0, int(n * 0.95) - 1)]
+        p99_lat = lats_sorted[max(0, int(n * 0.99) - 1)]
 
         # Completion Interval Stability (Cycle Jitter)
         # Measures the variation in time between consecutive iteration completions.
@@ -90,15 +94,15 @@ class SkillMetrics:
                 "mean_ms": round(mean_lat * 1000, 3),
                 "p50_ms": round(p50_lat * 1000, 3),
                 "p95_ms": round(p95_lat * 1000, 3),
+                "p99_ms": round(p99_lat * 1000, 3),
             },
             "throughput": {
                 "iterations_per_sec": round(throughput, 2),
             },
             "stability": {
-                "interval_cv": round(cv_cycle, 4), # Jitter of completion intervals
-                "coefficient_of_variation": round(cv_cycle, 4), # Alias
+                "interval_cv": round(cv_cycle, 4),
+                "interval_stddev_ms": round(stddev_cycle * 1000, 3), # Absolute jitter
                 "p95_interval_ms": round(p95_cycle * 1000, 3),
-                "max_interval_ms": round(max(cycles) * 1000, 3),
             },
         }
 

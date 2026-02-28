@@ -34,7 +34,7 @@ skills:
   - name: "skl::bench_nav"
     module: scheduler_benchmark.skills.nav2_skill
     topic_prefix: /robot1/skill/bench_nav
-    iterations: 100
+    iterations: 150
     warmup: 20
     params:
       grid_size: 500      # Occupancy grid size for path planning
@@ -45,7 +45,7 @@ skills:
   - name: "skl::bench_grasp"
     module: scheduler_benchmark.skills.vla_skill
     topic_prefix: /robot1/skill/bench_grasp
-    iterations: 100
+    iterations: 150
     warmup: 15
     params:
       image_size: 224     # Input image size
@@ -58,7 +58,7 @@ skills:
   - name: "skl::bench_inspect"
     module: scheduler_benchmark.skills.inspect_skill
     topic_prefix: /robot1/skill/bench_inspect
-    iterations: 100
+    iterations: 150
     warmup: 15
     params: {}
     dependencies:

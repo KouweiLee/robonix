@@ -678,10 +678,10 @@ class BenchmarkRunner:
                 result = json.load(f)
             stats = result.get("stats", {})
             logger.info(
-                "Result: mean=%.2fms, p99=%.2fms, cv=%.4f, throughput=%.1f/s",
+                "Result: mean=%.2fms, p95=%.2fms, cv=%.4f, throughput=%.1f/s",
                 stats.get("latency", {}).get("mean_ms", 0),
-                stats.get("latency", {}).get("p99_ms", 0),
-                stats.get("stability", {}).get("coefficient_of_variation", 0),
+                stats.get("latency", {}).get("p95_ms", 0),
+                stats.get("stability", {}).get("interval_cv", 0),
                 stats.get("throughput", {}).get("iterations_per_sec", 0),
             )
             return result
